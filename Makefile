@@ -1,5 +1,5 @@
 VERSION_NUM ?= 0.1.0
-LDFLAGS := -X github.com/obstalabs/mailreceipt/internal/cli.version=$(VERSION_NUM)
+LDFLAGS := -X github.com/ppiankov/mailreceipt/internal/cli.version=$(VERSION_NUM)
 
 .PHONY: build test vet fmt lint clean demo
 

@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: make test
+
+  release:
+    name: Release
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.version }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build and package binaries
+        run: |
+          VERSION=${{ steps.tag.outputs.version }}
+          VERSION_NUM=${VERSION#v}
+          PROJECT=mailreceipt
+          LDFLAGS="-s -w -X github.com/ppiankov/mailreceipt/internal/cli.version=${VERSION_NUM}"
+
+          platforms=(
+            "linux/amd64"
+            "linux/arm64"
+          )
+
+          mkdir -p dist staging
+
+          for platform in "${platforms[@]}"; do
+            GOOS="${platform%/*}"
+            GOARCH="${platform#*/}"
+            archive="${PROJECT}_${VERSION_NUM}_${GOOS}_${GOARCH}"
+
+            GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="$LDFLAGS" -o "staging/${PROJECT}" ./cmd/${PROJECT}/
+            tar -czf "dist/${archive}.tar.gz" -C staging "${PROJECT}"
+            rm -f "staging/${PROJECT}"
+          done
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          TAG=${{ steps.tag.outputs.version }}
+          VERSION=${TAG#v}
+          PROJECT=mailreceipt
+          REPO=${{ github.repository }}
+
+          CHANGELOG=$(awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{found=0} found" CHANGELOG.md 2>/dev/null || true)
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="Release ${TAG}"
+          fi
+
+          {
+            echo "${CHANGELOG}"
+            echo ""
+            echo "## Install"
+            echo ""
+            echo '```bash'
+            echo "# Linux (amd64)"
+            echo "curl -LO https://github.com/${REPO}/releases/download/${TAG}/${PROJECT}_${VERSION}_linux_amd64.tar.gz"
+            echo "tar -xzf ${PROJECT}_${VERSION}_linux_amd64.tar.gz"
+            echo "sudo mv ${PROJECT} /usr/local/bin/"
+            echo ""
+            echo "# Linux (arm64)"
+            echo "curl -LO https://github.com/${REPO}/releases/download/${TAG}/${PROJECT}_${VERSION}_linux_arm64.tar.gz"
+            echo "tar -xzf ${PROJECT}_${VERSION}_linux_arm64.tar.gz"
+            echo "sudo mv ${PROJECT} /usr/local/bin/"
+            echo '```'
+            echo ""
+            echo "**Verify checksums:** \`sha256sum -c checksums.txt\`"
+          } > /tmp/release-body.md
+
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/release-body.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.version }}
+          body: ${{ steps.notes.outputs.notes }}
+          files: dist/*
+          generate_release_notes: false
