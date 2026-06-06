@@ -1,0 +1,5 @@
+/mailreceipt
+/dist/
+*.receipt.json
+*.out
+.DS_Store

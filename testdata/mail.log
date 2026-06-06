@@ -1,0 +1,11 @@
+Jun  5 02:37:11 mail01 postfix/cleanup[20111]: 4F1A2B3C01: message-id=<reminder-209900123-0237@example-ip.test>
+Jun  5 02:37:12 mail01 postfix/qmgr[2010]: 4F1A2B3C01: from=<anna.petrova@example-ip.test>, size=4821, nrcpt=2 (queue active)
+Jun  5 02:37:14 mail01 postfix/smtp[20120]: 4F1A2B3C01: to=<jdoe@exampleclient.test>, relay=mx.exampleclient.test[203.0.113.25]:25, delay=2.1, delays=0.3/0/0.9/0.9, dsn=2.0.0, status=sent (250 2.0.0 OK: queued as A1B2C3)
+Jun  5 02:37:15 mail01 postfix/smtp[20121]: 4F1A2B3C01: to=<team@exampleclient.test>, relay=mx.exampleclient.test[203.0.113.25]:25, delay=2.4, delays=0.3/0/0.9/1.2, dsn=2.0.0, status=sent (250 2.0.0 OK: queued as A1B2C4)
+Jun  5 15:09:02 mail01 postfix/cleanup[20420]: 7C2D9E1F02: message-id=<reminder-209900123-1509@example-ip.test>
+Jun  5 15:09:03 mail01 postfix/qmgr[2010]: 7C2D9E1F02: from=<anna.petrova@example-ip.test>, size=5102, nrcpt=2 (queue active)
+Jun  5 15:09:20 mail01 postfix/smtp[20440]: 7C2D9E1F02: to=<jdoe@exampleclient.test>, relay=mx.exampleclient.test[203.0.113.25]:25, delay=17, delays=0.2/0/9/7.8, dsn=4.4.1, status=deferred (connect to mx.exampleclient.test[203.0.113.25]:25: Connection timed out)
+Jun  5 15:09:21 mail01 postfix/smtp[20441]: 7C2D9E1F02: to=<team@exampleclient.test>, relay=mx.exampleclient.test[203.0.113.25]:25, delay=18, delays=0.2/0/9/8.6, dsn=5.1.1, status=bounced (host mx.exampleclient.test[203.0.113.25] said: 550 5.1.1 <team@exampleclient.test>: Recipient address rejected: User unknown (in reply to RCPT TO command))
+Jun  5 15:41:55 mail01 postfix/smtp[20460]: 7C2D9E1F02: to=<jdoe@exampleclient.test>, relay=mx.exampleclient.test[203.0.113.25]:25, delay=1965, delays=1947/0/9/8.4, dsn=2.0.0, status=sent (250 2.0.0 OK: queued as D4E5F6)
+Mar 13 14:59:40 mail01 postfix/cleanup[8011]: 1A2B3C4D03: message-id=<report-209900123-0313@example-ip.test>
+Mar 13 14:59:42 mail01 postfix/smtp[8030]: 1A2B3C4D03: to=<jdoe@exampleclient.test>, relay=mx.exampleclient.test[203.0.113.25]:25, delay=1.8, delays=0.2/0/0.7/0.9, dsn=2.0.0, status=sent (250 2.0.0 OK: queued as 99X88Y)
