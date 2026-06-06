@@ -4,6 +4,7 @@
 
 ![status](https://img.shields.io/badge/status-MVP-orange)
 ![language](https://img.shields.io/badge/go-1.26-00ADD8)
+[![ANCC](https://img.shields.io/badge/ANCC-compliant-brightgreen)](https://ancc.dev)
 
 A client says they never got the email. Your log says otherwise. `mailreceipt` turns
 that log into a **cited delivery receipt** you can attach to the case.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ppiankov/mailreceipt/internal/config"
 	"github.com/ppiankov/mailreceipt/internal/deliver"
 	"github.com/ppiankov/mailreceipt/internal/eml"
 	"github.com/ppiankov/mailreceipt/internal/maillog"
@@ -26,7 +27,7 @@ func Root() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(checkCmd(), verifyCmd())
+	root.AddCommand(checkCmd(), verifyCmd(), initCmd(), doctorCmd())
 	return root
 }
 
@@ -49,6 +50,20 @@ func checkCmd() *cobra.Command {
 			if len(args) == 1 {
 				emailArg = args[0]
 			}
+
+			// .mailreceipt.yml supplies defaults; explicit flags override.
+			if cfg, ok, _ := config.Load(config.FileName); ok {
+				if logPath == "" && !cmd.Flags().Changed("log") {
+					logPath = cfg.Log
+				}
+				if !cmd.Flags().Changed("log-year") && cfg.LogYear != 0 {
+					logYear = cfg.LogYear
+				}
+				if cfg.CasePrefix != "" {
+					caseRef = cfg.CasePrefix + caseRef
+				}
+			}
+
 			emailReader, closeEmail, err := openInput(emailArg)
 			if err != nil {
 				return err
@@ -96,6 +111,11 @@ func verifyCmd() *cobra.Command {
 		Short: "Verify every citation in a receipt still appears verbatim in the log",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if logPath == "" && !cmd.Flags().Changed("log") {
+				if cfg, ok, _ := config.Load(config.FileName); ok {
+					logPath = cfg.Log
+				}
+			}
 			if logPath == "" {
 				return fmt.Errorf("--log <mail.log> is required")
 			}

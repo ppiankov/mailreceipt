@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-06-06
+
+### Added
+- `doctor` command — diagnoses a mail log (exists, readable, non-empty, timestamp
+  format, delivery-line count) so a `not_found` result can be distinguished from an
+  unreadable or wrong-format log. Emits an ANCC-shaped JSON report with `--format json`.
+- `init` command — writes a `.mailreceipt.yml` with project defaults (`log`,
+  `log_year`, `case_prefix`). `check` and `verify` read it as defaults; explicit
+  flags always override.
+- `docs/SKILL.md` and an ANCC-compliant CLI surface — mailreceipt now passes
+  `ancc validate` (0 failures) and carries the ANCC badge.
+
 ## [0.2.0] - 2026-06-06
 
 ### Added
