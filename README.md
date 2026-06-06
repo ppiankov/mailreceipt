@@ -123,9 +123,12 @@ matching.
 mailreceipt check reminder.eml --log mail.log --format json
 ```
 
-Returns a structured artifact with `artifact_type`, `summary`, and per-recipient
-`outcome` / `match_method` / `citation` / `relay` / `response` / `time`.
-Attach it to a case, feed it to a downstream system, or store it as evidence.
+Returns a structured artifact with `artifact_type`, `summary`, `summary_counts`
+(the per-outcome tally behind the summary), and per-recipient `outcome` /
+`match_method` / `citation` / `relay` / `response` / `time`. When recipients
+resolve to more than one outcome the summary is `mixed` and the headline states
+the split. Attach it to a case, feed it to a downstream system, or store it as
+evidence.
 
 ## Verifying a receipt
 

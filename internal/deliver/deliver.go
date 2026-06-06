@@ -37,6 +37,10 @@ const (
 	// message was never sent through this MTA, the log does not cover the period,
 	// or matching failed. Explicitly NOT "delivered".
 	NotFound Outcome = "not_found"
+	// Mixed: recipients resolved to more than one terminal outcome (e.g. some
+	// delivered, some not found). The overall verdict is neither — it is the mix.
+	// Only ever a whole-email summary, never a per-recipient outcome.
+	Mixed Outcome = "mixed"
 )
 
 // MatchMethod records how the recipient's events were linked, for the receipt's
@@ -202,30 +206,38 @@ func outcomeFor(s maillog.Status) Outcome {
 }
 
 // Summary reduces the per-recipient results to a single headline outcome for the
-// whole email: bounced if any hard-failed, else deferred if any pending, else
-// not_found if any recipient is missing, else delivered.
+// whole email. A hard bounce always surfaces; else a pending deferral; else, when
+// every recipient shares one outcome, that outcome; else "mixed". The headline is
+// a faithful compression of the rows — never the best case, never the worst, the
+// actual case. Per-recipient detail and counts (Counts) carry the specifics.
 func (r Result) Summary() Outcome {
-	var anyDeferred, anyNotFound, anyDelivered bool
-	for _, rr := range r.Recipients {
-		switch rr.Outcome {
-		case Bounced:
-			return Bounced
-		case Deferred:
-			anyDeferred = true
-		case NotFound:
-			anyNotFound = true
-		case Delivered:
-			anyDelivered = true
+	c := r.Counts()
+	switch {
+	case c[Bounced] > 0:
+		// A hard bounce must always surface as the headline.
+		return Bounced
+	case c[Deferred] > 0 && c[Bounced] == 0:
+		return Deferred
+	case len(c) == 0:
+		return NotFound
+	case len(c) == 1:
+		// Exactly one distinct outcome across all recipients: that is the verdict
+		// (all delivered -> delivered; all not_found -> not_found).
+		for o := range c {
+			return o
 		}
 	}
-	switch {
-	case anyDeferred:
-		return Deferred
-	case anyNotFound:
-		return NotFound
-	case anyDelivered:
-		return Delivered
-	default:
-		return NotFound
+	// More than one distinct non-bounce/non-deferred outcome (e.g. delivered +
+	// not_found): the verdict is the mix, not the best or worst single row.
+	return Mixed
+}
+
+// Counts tallies per-recipient outcomes. The headline and JSON summary_counts are
+// both derived from this, so the summary can never contradict the rows.
+func (r Result) Counts() map[Outcome]int {
+	c := map[Outcome]int{}
+	for _, rr := range r.Recipients {
+		c[rr.Outcome]++
 	}
+	return c
 }

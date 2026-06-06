@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-06-06
+
+### Added
+- `mixed` overall summary for receipts whose recipients resolved to more than one
+  outcome (e.g. some delivered, some not found). The Markdown headline states the
+  mix — `Overall: Mixed — 4 delivered, 1 not found` — and the JSON artifact gains
+  a `summary_counts` object with the per-outcome tally.
+
+### Fixed
+- The overall headline no longer contradicts the per-recipient table. Previously a
+  single `not_found` recipient collapsed the whole verdict to `Not found` even when
+  other recipients were delivered; the summary now faithfully compresses the rows.
+
 ## [0.1.1] - 2026-06-06
 
 ### Fixed

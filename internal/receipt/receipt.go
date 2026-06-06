@@ -21,18 +21,23 @@ type Receipt struct {
 	GeneratedAt  string          `json:"generated_at,omitempty"`
 	Case         string          `json:"case,omitempty"`
 	Summary      deliver.Outcome `json:"summary"`
-	Result       deliver.Result  `json:"result"`
+	// SummaryCounts is the per-outcome tally the summary is derived from, so a
+	// machine consumer can see the mix behind a "mixed" summary without reparsing
+	// the rows. Keyed by outcome string (e.g. "delivered", "not_found").
+	SummaryCounts map[string]int `json:"summary_counts"`
+	Result        deliver.Result `json:"result"`
 }
 
 // New builds a Receipt from a delivery Result. generatedAt is passed in (not read
 // from the clock) so callers control determinism; pass the zero time to omit it.
 func New(res deliver.Result, caseRef string, generatedAt time.Time) Receipt {
 	r := Receipt{
-		ArtifactType: "mail_delivery_receipt",
-		Tool:         "mailreceipt",
-		Case:         caseRef,
-		Summary:      res.Summary(),
-		Result:       res,
+		ArtifactType:  "mail_delivery_receipt",
+		Tool:          "mailreceipt",
+		Case:          caseRef,
+		Summary:       res.Summary(),
+		SummaryCounts: countsJSON(res.Counts()),
+		Result:        res,
 	}
 	if !generatedAt.IsZero() {
 		r.GeneratedAt = generatedAt.UTC().Format(time.RFC3339)
@@ -58,7 +63,7 @@ func (r Receipt) Markdown() string {
 	if r.Result.MessageID != "" {
 		fmt.Fprintf(&b, "**Message-ID:** %s  \n", r.Result.MessageID)
 	}
-	fmt.Fprintf(&b, "**Overall:** %s\n\n", headline(r.Summary))
+	fmt.Fprintf(&b, "**Overall:** %s\n\n", headline(r.Summary, r.Result.Counts()))
 
 	b.WriteString("| Recipient | Outcome | When | Evidence |\n")
 	b.WriteString("|---|---|---|---|\n")
@@ -97,8 +102,10 @@ func (r Receipt) Markdown() string {
 	return b.String()
 }
 
-// headline gives a short status sentence for the overall summary.
-func headline(o deliver.Outcome) string {
+// headline gives a short status sentence for the overall summary. For a mixed
+// verdict it states the per-outcome counts so the headline faithfully compresses
+// the rows rather than collapsing to one of them.
+func headline(o deliver.Outcome, counts map[deliver.Outcome]int) string {
 	switch o {
 	case deliver.Delivered:
 		return "Delivered — accepted by the remote mail server"
@@ -108,9 +115,45 @@ func headline(o deliver.Outcome) string {
 		return "Deferred — temporary failure, retrying (not yet delivered)"
 	case deliver.NotFound:
 		return "Not found — no matching delivery record in the log"
+	case deliver.Mixed:
+		return "Mixed — " + countsPhrase(counts)
 	default:
 		return string(o)
 	}
+}
+
+// outcomeOrder fixes the display order so mixed headlines and JSON are
+// deterministic regardless of recipient order.
+var outcomeOrder = []deliver.Outcome{
+	deliver.Delivered, deliver.Bounced, deliver.Deferred, deliver.NotFound,
+}
+
+var outcomeWords = map[deliver.Outcome]string{
+	deliver.Delivered: "delivered",
+	deliver.Bounced:   "bounced",
+	deliver.Deferred:  "deferred",
+	deliver.NotFound:  "not found",
+}
+
+// countsPhrase renders "4 delivered, 1 not found" in a stable outcome order.
+func countsPhrase(counts map[deliver.Outcome]int) string {
+	var parts []string
+	for _, o := range outcomeOrder {
+		if n := counts[o]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, outcomeWords[o]))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// countsJSON converts the outcome tally to string-keyed counts for the JSON
+// artifact (e.g. {"delivered": 4, "not_found": 1}).
+func countsJSON(counts map[deliver.Outcome]int) map[string]int {
+	out := make(map[string]int, len(counts))
+	for o, n := range counts {
+		out[string(o)] = n
+	}
+	return out
 }
 
 func badge(o deliver.Outcome) string {

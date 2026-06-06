@@ -110,3 +110,63 @@ func TestRecipientFallbackWhenNoMessageID(t *testing.T) {
 		t.Fatalf("want recipient_window match, got %s", jdoe.Match)
 	}
 }
+
+// resultWith builds a Result from bare per-recipient outcomes, for testing the
+// Summary/Counts reduction directly.
+func resultWith(outcomes ...Outcome) Result {
+	var rr []RecipientResult
+	for i, o := range outcomes {
+		rr = append(rr, RecipientResult{Recipient: string(rune('a'+i)) + "@x.test", Outcome: o})
+	}
+	return Result{Recipients: rr}
+}
+
+func TestSummaryAllDelivered(t *testing.T) {
+	if got := resultWith(Delivered, Delivered).Summary(); got != Delivered {
+		t.Fatalf("all delivered -> delivered, got %s", got)
+	}
+}
+
+func TestSummaryAllNotFound(t *testing.T) {
+	if got := resultWith(NotFound, NotFound).Summary(); got != NotFound {
+		t.Fatalf("all not_found -> not_found, got %s", got)
+	}
+}
+
+func TestSummaryAnyBounceWins(t *testing.T) {
+	if got := resultWith(Delivered, NotFound, Bounced).Summary(); got != Bounced {
+		t.Fatalf("any bounce must surface over a mix, got %s", got)
+	}
+}
+
+func TestSummaryDeferredOverMixNoBounce(t *testing.T) {
+	if got := resultWith(Delivered, NotFound, Deferred).Summary(); got != Deferred {
+		t.Fatalf("deferred (no bounce) must surface, got %s", got)
+	}
+}
+
+func TestSummaryDeliveredPlusNotFoundIsMixed(t *testing.T) {
+	// The incident case: 4 delivered + 1 not_found must be mixed, never not_found.
+	got := resultWith(Delivered, Delivered, Delivered, Delivered, NotFound).Summary()
+	if got != Mixed {
+		t.Fatalf("delivered+not_found must be mixed, got %s", got)
+	}
+}
+
+func TestSummaryNeverContradictsRows(t *testing.T) {
+	// Invariant: if any recipient is delivered, the summary is never not_found.
+	res := resultWith(Delivered, NotFound)
+	if got := res.Summary(); got == NotFound {
+		t.Fatalf("summary must not be not_found while a row is delivered, got %s", got)
+	}
+}
+
+func TestCounts(t *testing.T) {
+	c := resultWith(Delivered, Delivered, Delivered, Delivered, NotFound).Counts()
+	if c[Delivered] != 4 || c[NotFound] != 1 {
+		t.Fatalf("counts wrong: %+v", c)
+	}
+	if len(c) != 2 {
+		t.Fatalf("only two distinct outcomes expected, got %d", len(c))
+	}
+}
