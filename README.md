@@ -2,6 +2,9 @@
 
 > Attach proof, not vibes.
 
+![status](https://img.shields.io/badge/status-MVP-orange)
+![language](https://img.shields.io/badge/go-1.26-00ADD8)
+
 A client says they never got the email. Your log says otherwise. `mailreceipt` turns
 that log into a **cited delivery receipt** you can attach to the case.
 
@@ -31,9 +34,6 @@ mailreceipt check reminder.eml --log /var/log/mail.log --case CASE-001
 
 Every outcome is the disposition your mail server recorded, quoted verbatim.
 No model in the delivery path — a 250 is a 250, a 550 is a 550.
-
-![status](https://img.shields.io/badge/status-MVP-orange)
-![language](https://img.shields.io/badge/go-1.26-00ADD8)
 
 ## What the receipt proves
 
@@ -77,7 +77,7 @@ output safe to attach to a case and safe to act on.
 
 `mailreceipt` is designed to work with or without an agent in the loop. When an
 agent drives the workflow, run it behind a file-access gate such as
-[Bulwark](https://github.com/ppiankov/bulwark) so the agent reads only the
+[Bulwark](https://obstalabs.dev/bulwark) so the agent reads only the
 specific evidence needed — not the whole mailbox.
 
 ```sh
