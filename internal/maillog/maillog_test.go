@@ -54,3 +54,52 @@ func TestRawLineIsPreservedVerbatim(t *testing.T) {
 		}
 	}
 }
+
+// rfc3339Log is a sanitized version of the 2026-06-06 incident: a modern rsyslog
+// host (Debian 12+) writes RFC3339 timestamps. The KLMS line is non-postfix noise
+// and must be ignored; the three smtp lines share one queue id and are all sent.
+const rfc3339Log = `2026-06-05T14:09:33.208849+02:00 mail KLMS: clean: message-id="<m9@ex.test>": rcpt-to="a@client.test","b@client.test","c@client.test"
+2026-06-05T14:09:33.300000+02:00 mail postfix/cleanup[3673400]: F3867160060B: message-id=<m9@ex.test>
+2026-06-05T14:09:36.750604+02:00 mail postfix/smtp[3673461]: F3867160060B: to=<a@client.test>, relay=mx.client.test[52.101.10.14]:25, dsn=2.6.0, status=sent (250 2.6.0 Queued mail for delivery)
+2026-06-05T14:09:36.750855+02:00 mail postfix/smtp[3673461]: F3867160060B: to=<b@client.test>, relay=mx.client.test[52.101.10.14]:25, dsn=2.6.0, status=sent (250 2.6.0 Queued mail for delivery)
+2026-06-05T14:09:36.751041+02:00 mail postfix/smtp[3673461]: F3867160060B: to=<c@client.test>, relay=mx.client.test[52.101.10.14]:25, dsn=2.6.0, status=sent (250 2.6.0 Queued mail for delivery)
+`
+
+func TestParseRFC3339Timestamps(t *testing.T) {
+	// year=0 deliberately: RFC3339 lines carry their own year and must ignore it.
+	l := Parse(strings.NewReader(rfc3339Log), 0)
+	if len(l.Events) != 3 {
+		t.Fatalf("want 3 delivery events from RFC3339 log, got %d", len(l.Events))
+	}
+	for _, e := range l.Events {
+		if e.Status != StatusSent {
+			t.Fatalf("recipient %q should be sent, got %q", e.To, e.Status)
+		}
+		if e.MessageID != "m9@ex.test" {
+			t.Fatalf("recipient %q should link to m9@ex.test via cleanup line, got %q", e.To, e.MessageID)
+		}
+	}
+}
+
+func TestParseRFC3339TimeIsSelfDated(t *testing.T) {
+	// Pass an absurd year; RFC3339 must ignore it and use its own (2026).
+	l := Parse(strings.NewReader(rfc3339Log), 1999)
+	a := l.EventsForRecipient("a@client.test", time.Time{}, time.Time{})
+	if len(a) != 1 {
+		t.Fatalf("want 1 event for a@, got %d", len(a))
+	}
+	if y := a[0].Time.Year(); y != 2026 {
+		t.Fatalf("RFC3339 timestamp should self-date to 2026, got year %d", y)
+	}
+	if off := a[0].Time.Format("-07:00"); off != "+02:00" {
+		t.Fatalf("RFC3339 zone offset should be preserved (+02:00), got %s", off)
+	}
+}
+
+func TestParseMixedTimestampFormats(t *testing.T) {
+	mixed := log + rfc3339Log // BSD block (2 events) + RFC3339 block (3 events)
+	l := Parse(strings.NewReader(mixed), 2026)
+	if len(l.Events) != 5 {
+		t.Fatalf("mixed-format log should yield 5 events, got %d", len(l.Events))
+	}
+}

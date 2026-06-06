@@ -56,8 +56,10 @@ type Log struct {
 
 var (
 	// The leading syslog timestamp + host + "postfix/<daemon>[pid]: <queue>: rest"
-	// We capture the timestamp, the queue id, and the remainder.
-	lineRe = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+\S+\s+postfix/\w+\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
+	// We capture the timestamp, the queue id, and the remainder. The timestamp is
+	// either the traditional BSD form ("Jun  5 14:09:36") or the RFC3339/ISO-8601
+	// form modern rsyslog emits by default ("2026-06-05T14:09:36.750604+02:00").
+	lineRe = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/\w+\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
 
 	messageIDRe = regexp.MustCompile(`message-id=<?([^>\s,]+)>?`)
 	toRe        = regexp.MustCompile(`\bto=<([^>]*)>`)
@@ -65,9 +67,31 @@ var (
 	statusRe    = regexp.MustCompile(`\bstatus=(\w+)\s*(?:\((.*)\))?`)
 )
 
-// syslog timestamps have no year; callers may set Year to stamp parsed times.
-// Postfix default "Mon DD HH:MM:SS" is parsed against this layout.
+// Traditional BSD syslog timestamps have no year; callers pass the year the log
+// covers so "Mon DD HH:MM:SS" can be stamped. RFC3339 timestamps carry their own
+// year and zone and ignore the supplied year.
 const syslogLayout = "Jan 2 15:04:05 2006"
+
+// parseTimestamp parses either a BSD syslog timestamp ("Jun  5 14:09:36",
+// completed with year) or an RFC3339/ISO-8601 timestamp emitted by modern
+// rsyslog ("2026-06-05T14:09:36.750604+02:00", self-dating). The bool reports
+// whether a time was recovered; callers leave Event.Time zero when false.
+func parseTimestamp(tsRaw string, year int) (time.Time, bool) {
+	// RFC3339 timestamps start with a 4-digit year and contain a 'T'.
+	if len(tsRaw) >= 5 && tsRaw[4] == '-' && strings.Contains(tsRaw, "T") {
+		if t, err := time.Parse(time.RFC3339Nano, tsRaw); err == nil {
+			return t, true
+		}
+		if t, err := time.Parse(time.RFC3339, tsRaw); err == nil {
+			return t, true
+		}
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(syslogLayout, tsRaw+" "+itoa(year)); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
 
 // Parse reads Postfix log lines from r. year is used to complete the
 // year-less syslog timestamp (pass the year the log covers; 0 uses 2026 as a
@@ -117,7 +141,7 @@ func Parse(r io.Reader, year int) Log {
 		if rl := relayRe.FindStringSubmatch(rest); rl != nil {
 			ev.Relay = strings.TrimSpace(rl[1])
 		}
-		if t, err := time.Parse(syslogLayout, tsRaw+" "+itoa(year)); err == nil {
+		if t, ok := parseTimestamp(tsRaw, year); ok {
 			ev.Time = t
 		}
 		l.Events = append(l.Events, ev)

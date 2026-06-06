@@ -153,10 +153,12 @@ mail.log  ──► parse to per-recipient delivery events  [internal/maillog]
 ## Limitations
 
 - **Postfix syslog format** only. Exim, Sendmail, journald/JSON not yet supported.
+  Both timestamp styles are read: traditional BSD (`Jun  5 14:09:36`) and
+  RFC3339 / ISO-8601 (`2026-06-05T14:09:36+02:00`, the modern rsyslog default).
 - **Self-hosted / relayed mail only.** If your mail goes through Gmail or
   Microsoft 365 with no local log, there is nothing to read.
-- **Year-less syslog timestamps** default to the current year; set `--log-year`
-  for older logs.
+- **Year-less BSD timestamps** default to the current year; set `--log-year`
+  for older logs. RFC3339 timestamps are self-dating and ignore `--log-year`.
 - **Transport evidence only.** The receipt cannot see past relay handoff.
 
 ## License
