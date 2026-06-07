@@ -27,6 +27,11 @@ type Email struct {
 	DateRaw   string    `json:"date_raw,omitempty"`
 }
 
+var lenientDateLayouts = []string{
+	"Monday, January 2, 2006 3:04 PM",
+	"Monday, January 2, 2006 3:04:05 PM",
+}
+
 // Recipients returns To + Cc addresses, lowercased and de-duplicated.
 func (e Email) Recipients() []string {
 	seen := map[string]bool{}
@@ -61,15 +66,19 @@ func parseRFC822(raw []byte) (Email, bool) {
 		return Email{}, false
 	}
 	h := msg.Header
+	dateRaw := h.Get("Date")
+	if dateRaw == "" {
+		dateRaw = h.Get("Sent")
+	}
 	e := Email{
 		MessageID: normalizeMessageID(h.Get("Message-Id")),
 		From:      h.Get("From"),
 		Subject:   h.Get("Subject"),
 		To:        splitAddrs(h.Get("To")),
 		Cc:        splitAddrs(h.Get("Cc")),
-		DateRaw:   h.Get("Date"),
+		DateRaw:   dateRaw,
 	}
-	if t, err := mail.ParseDate(h.Get("Date")); err == nil {
+	if t, ok := parseLenientDate(dateRaw); ok {
 		e.Date = t
 	}
 	// Consider it a real RFC822 parse only if we got at least a Message-ID or a
@@ -101,9 +110,30 @@ func parseLenient(raw []byte) Email {
 			e.Subject = after(ln, ":")
 		case (strings.HasPrefix(lower, "sent:") || strings.HasPrefix(lower, "date:")) && e.DateRaw == "":
 			e.DateRaw = after(ln, ":")
+			if t, ok := parseLenientDate(e.DateRaw); ok {
+				e.Date = t
+			}
 		}
 	}
 	return e
+}
+
+func parseLenientDate(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := mail.ParseDate(raw); err == nil {
+		return t, true
+	}
+	// WO-8: pasted top-of-thread dates need explicit layouts so recipient
+	// fallback can stay bounded instead of guessing across the whole log.
+	for _, layout := range lenientDateLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // normalizeMessageID strips angle brackets and lowercases for stable matching.

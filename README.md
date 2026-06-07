@@ -118,6 +118,12 @@ message or a pasted top-of-thread block (the messy `From:/Sent:/To:` forwarded
 format). When there is no `Message-ID`, it falls back to recipient + time-window
 matching.
 
+## Failure modes
+
+- Pasted top-of-thread blocks with no `Message-ID` use recipient + parsed send
+  time. If the pasted `Sent:`/`Date:` value is unparseable, mailreceipt returns
+  `not_found` rather than matching every log event for that recipient.
+
 ## JSON output
 
 ```sh

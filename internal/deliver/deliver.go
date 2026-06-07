@@ -121,11 +121,16 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log) RecipientResult
 	}
 	// 2) Fallback: recipient within a time window around the send.
 	if len(events) == 0 {
-		var from, until time.Time
-		if !e.Date.IsZero() {
-			from = e.Date.Add(-Window)
-			until = e.Date.Add(Window)
+		if e.Date.IsZero() {
+			// WO-8: no send time means recipient fallback would be unbounded.
+			return RecipientResult{
+				Recipient: rcpt,
+				Outcome:   NotFound,
+				Match:     MatchNone,
+			}
 		}
+		from := e.Date.Add(-Window)
+		until := e.Date.Add(Window)
 		events = log.EventsForRecipient(rcpt, from, until)
 		if len(events) > 0 {
 			method = MatchRecipient

@@ -3,6 +3,7 @@ package deliver
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ppiankov/mailreceipt/internal/eml"
 	"github.com/ppiankov/mailreceipt/internal/maillog"
@@ -100,7 +101,10 @@ func TestCaveatAlwaysPresent(t *testing.T) {
 
 func TestRecipientFallbackWhenNoMessageID(t *testing.T) {
 	// No message-id on the email; must fall back to recipient matching.
-	e := eml.Email{To: []string{"jdoe@exampleclient.test"}}
+	e := eml.Email{
+		To:   []string{"jdoe@exampleclient.test"},
+		Date: time.Date(2026, 6, 5, 15, 9, 0, 0, time.UTC),
+	}
 	res := Analyze(e, parseLog(t, sampleLog))
 	jdoe := find(res, "jdoe@exampleclient.test")
 	if jdoe.Outcome != Delivered {
@@ -108,6 +112,36 @@ func TestRecipientFallbackWhenNoMessageID(t *testing.T) {
 	}
 	if jdoe.Match != MatchRecipient {
 		t.Fatalf("want recipient_window match, got %s", jdoe.Match)
+	}
+}
+
+func TestRecipientFallbackRequiresDateWhenNoMessageID(t *testing.T) {
+	e := eml.Email{To: []string{"jdoe@exampleclient.test"}}
+	res := Analyze(e, parseLog(t, sampleLog))
+	jdoe := find(res, "jdoe@exampleclient.test")
+	if jdoe.Outcome != NotFound {
+		t.Fatalf("no-date fallback: want not_found, got %s", jdoe.Outcome)
+	}
+	if jdoe.Match != MatchNone {
+		t.Fatalf("no-date fallback: want no match, got %s", jdoe.Match)
+	}
+	if jdoe.Citation != "" {
+		t.Fatalf("not_found must carry no citation, got: %s", jdoe.Citation)
+	}
+}
+
+func TestRecipientFallbackRejectsEventsOutsideWindow(t *testing.T) {
+	e := eml.Email{
+		To:   []string{"jdoe@exampleclient.test"},
+		Date: time.Date(2026, 7, 5, 15, 9, 0, 0, time.UTC),
+	}
+	res := Analyze(e, parseLog(t, sampleLog))
+	jdoe := find(res, "jdoe@exampleclient.test")
+	if jdoe.Outcome != NotFound {
+		t.Fatalf("outside-window fallback: want not_found, got %s", jdoe.Outcome)
+	}
+	if jdoe.Match != MatchNone {
+		t.Fatalf("outside-window fallback: want no match, got %s", jdoe.Match)
 	}
 }
 

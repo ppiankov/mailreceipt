@@ -153,6 +153,9 @@ repeatedly against one server's log.
   Distrust `not_found`; the receipt is measuring the wrong evidence.
 - Year-less BSD timestamps without `--log-year`: delivery times stamp with the
   default year and may be wrong for old logs. RFC3339 logs self-date and ignore it.
+- Pasted top-of-thread block with no Message-ID and an unparseable `Sent:`/`Date:`
+  value: `check` reports `not_found`; it does not match recipient events across
+  the whole log without a time bound.
 
 ## Parsing examples
 

@@ -3,6 +3,7 @@ package eml
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseRFC822(t *testing.T) {
@@ -51,6 +52,33 @@ Dear Colleagues,
 	}
 	if got[0] != "jdoe@client.test" {
 		t.Fatalf("lenient recipient extraction: got %v", got)
+	}
+	if e.DateRaw != "Friday, June 5, 2026 3:09 PM" {
+		t.Fatalf("date raw: got %q", e.DateRaw)
+	}
+	want := time.Date(2026, 6, 5, 15, 9, 0, 0, time.UTC)
+	if !e.Date.Equal(want) {
+		t.Fatalf("lenient sent date: want %s, got %s", want, e.Date)
+	}
+}
+
+func TestParseLenientMailStyleDate(t *testing.T) {
+	raw := `Forwarded message
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+From: Anna <anna@ip.test>
+To: jdoe@client.test
+Subject: matter
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.DateRaw != "Fri, 5 Jun 2026 15:09:00 +0000" {
+		t.Fatalf("date raw: got %q", e.DateRaw)
+	}
+	want := time.Date(2026, 6, 5, 15, 9, 0, 0, time.UTC)
+	if !e.Date.Equal(want) {
+		t.Fatalf("mail-style lenient date: want %s, got %s", want, e.Date)
 	}
 }
 
