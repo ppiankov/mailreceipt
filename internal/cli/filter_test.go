@@ -67,6 +67,52 @@ func TestFilterJSONAttachmentBase64EncodesUTF8(t *testing.T) {
 	}
 }
 
+// WO-22: generated reply boundaries replace the legacy static delimiter.
+func TestFilterUsesGeneratedBoundaryAndIgnoresLegacySubjectBoundary(t *testing.T) {
+	boundary := filterReplyBoundaryPrefix + "00112233445566778899aabbccddeeff"
+	withFilterBoundaries(t, boundary)
+	sent := sentMailWithSubject("sent-1@acme.test", "client@example.test", "--"+filterLegacyReplyBoundary)
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sent), filterConfig)
+	if got := filterReplyBoundaryParam(t, out); got != boundary {
+		t.Fatalf("reply boundary: got %q, want %q", got, boundary)
+	}
+	if strings.Contains(out, `boundary="`+filterLegacyReplyBoundary+`"`) {
+		t.Fatalf("reply should not use legacy static boundary, got:\n%s", out)
+	}
+	if parts := filterReplyPartCount(t, out); parts != 2 {
+		t.Fatalf("legacy boundary text in Subject should not create extra parts, got %d parts:\n%s", parts, out)
+	}
+}
+
+// WO-22: each reply asks the injected boundary source for a fresh value.
+func TestFilterBoundarySourceRunsPerReply(t *testing.T) {
+	first := filterReplyBoundaryPrefix + "11111111111111111111111111111111"
+	second := filterReplyBoundaryPrefix + "22222222222222222222222222222222"
+	withFilterBoundaries(t, first, second)
+	out1 := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), filterConfig)
+	out2 := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), filterConfig)
+	if got := filterReplyBoundaryParam(t, out1); got != first {
+		t.Fatalf("first reply boundary: got %q, want %q", got, first)
+	}
+	if got := filterReplyBoundaryParam(t, out2); got != second {
+		t.Fatalf("second reply boundary: got %q, want %q", got, second)
+	}
+}
+
+// WO-22: delimiter-line collisions regenerate instead of trusting the first candidate.
+func TestFilterBoundaryRegeneratesOnDelimiterLineCollision(t *testing.T) {
+	colliding := filterReplyBoundaryPrefix + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	safe := filterReplyBoundaryPrefix + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	withFilterBoundaries(t, colliding, safe)
+	got, err := filterReplyBoundary("before\r\n--" + colliding + "\r\nafter")
+	if err != nil {
+		t.Fatalf("generate boundary: %v", err)
+	}
+	if got != safe {
+		t.Fatalf("boundary after collision: got %q, want %q", got, safe)
+	}
+}
+
 func TestFilterDropsExternalEnvelopeSender(t *testing.T) {
 	out := runFilter(t, "client@example.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), filterConfig)
 	if out != "" {
@@ -283,6 +329,64 @@ func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArg
 	return out.String()
 }
 
+// WO-22: inject deterministic boundary values without reading crypto/rand in assertions.
+func withFilterBoundaries(t *testing.T, boundaries ...string) {
+	t.Helper()
+	oldBoundary := filterNewBoundary
+	next := 0
+	filterNewBoundary = func() (string, error) {
+		if next >= len(boundaries) {
+			return "", io.ErrUnexpectedEOF
+		}
+		boundary := boundaries[next]
+		next++
+		return boundary, nil
+	}
+	t.Cleanup(func() { filterNewBoundary = oldBoundary })
+}
+
+// WO-22: expose the generated MIME boundary for deterministic assertions.
+func filterReplyBoundaryParam(t *testing.T, out string) string {
+	t.Helper()
+	msg, err := mail.ReadMessage(strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("reply should be a parseable message: %v\n%s", err, out)
+	}
+	_, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("reply content type should parse: %v", err)
+	}
+	return params["boundary"]
+}
+
+// WO-22: count parsed MIME parts to catch delimiter injection regressions.
+func filterReplyPartCount(t *testing.T, out string) int {
+	t.Helper()
+	msg, err := mail.ReadMessage(strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("reply should be a parseable message: %v\n%s", err, out)
+	}
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("reply content type should parse: %v", err)
+	}
+	if mediaType != "multipart/mixed" {
+		t.Fatalf("reply content type: got %q", mediaType)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	parts := 0
+	for {
+		_, err := mr.NextPart()
+		if err == io.EOF {
+			return parts
+		}
+		if err != nil {
+			t.Fatalf("read reply part: %v", err)
+		}
+		parts++
+	}
+}
+
 // WO-19: decode the generated attachment exactly as a receiver would.
 func filterJSONAttachment(t *testing.T, out string) (string, []byte, []byte) {
 	t.Helper()
@@ -356,6 +460,18 @@ Content-Disposition: attachment; filename="sent.eml"
 
 func sentMail(messageID, recipient string) string {
 	return sentMailWithHeaders(messageID, recipient, "From: Attorney <attorney1@acme.test>")
+}
+
+// WO-22: subject-specific sent-mail fixtures carry legacy boundary probes.
+func sentMailWithSubject(messageID, recipient, subject string) string {
+	return `From: Attorney <attorney1@acme.test>
+To: ` + recipient + `
+Subject: ` + subject + `
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <` + messageID + `>
+
+body
+`
 }
 
 func sentMailWithHeaders(messageID, recipient, headers string) string {

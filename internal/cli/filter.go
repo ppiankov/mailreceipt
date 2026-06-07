@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"mime"
@@ -20,9 +22,13 @@ import (
 )
 
 const (
-	filterReplyBoundary    = "mailreceipt-filter-reply"
-	filterBase64LineLength = 76                    // WO-19: MIME base64 bodies are wrapped for transport safety.
-	safeMailboxLocalChars  = "!#$%&'*+-/=?^_`{|}~" // WO-21: dot-atom symbols allowed in trusted local-parts.
+	filterLegacyReplyBoundary = "mailreceipt-filter-reply"      // WO-22: old static boundary retained only as a safety sentinel.
+	filterReplyBoundaryPrefix = filterLegacyReplyBoundary + "-" // WO-22: generated boundaries stay recognizable without being predictable.
+	filterBoundaryRandomBytes = 16                              // WO-22: 128 bits makes adversarial delimiter guesses impractical.
+	filterBoundaryMaxAttempts = 8                               // WO-22: fail closed if injected/random candidates keep colliding.
+	filterBoundaryMaxLength   = 70                              // WO-22: RFC 2046 boundary text length limit.
+	filterBase64LineLength    = 76                              // WO-19: MIME base64 bodies are wrapped for transport safety.
+	safeMailboxLocalChars     = "!#$%&'*+-/=?^_`{|}~"           // WO-21: dot-atom symbols allowed in trusted local-parts.
 )
 
 func filterCmd() *cobra.Command {
@@ -121,6 +127,9 @@ func filterCmd() *cobra.Command {
 
 // WO-16: injectable clock keeps reply Date tests deterministic.
 var filterNow = time.Now
+
+// WO-22: injectable MIME boundary source keeps random-boundary tests deterministic.
+var filterNewBoundary = randomFilterReplyBoundary
 
 func filterLoopGuard(raw []byte) bool {
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
@@ -305,6 +314,12 @@ func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.R
 	if err != nil {
 		return err
 	}
+	markdownBody := rec.Markdown()
+	encodedJSONBody := base64.StdEncoding.EncodeToString(jsonBody)
+	boundary, err := filterReplyBoundary(markdownBody, encodedJSONBody)
+	if err != nil {
+		return err
+	}
 	subject := "Mail delivery receipt"
 	if rec.Result.Subject != "" {
 		subject += ": " + rec.Result.Subject
@@ -315,18 +330,84 @@ func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.R
 	fmt.Fprintf(w, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", sanitizeHeader(subject)))
 	fmt.Fprint(w, "Auto-Submitted: auto-generated\r\n")
 	fmt.Fprint(w, "MIME-Version: 1.0\r\n")
-	fmt.Fprintf(w, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", filterReplyBoundary)
-	fmt.Fprintf(w, "--%s\r\n", filterReplyBoundary)
+	fmt.Fprintf(w, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary)
+	fmt.Fprintf(w, "--%s\r\n", boundary)
 	fmt.Fprint(w, "Content-Type: text/plain; charset=utf-8\r\n")
 	fmt.Fprint(w, "Content-Transfer-Encoding: 8bit\r\n\r\n")
-	fmt.Fprint(w, rec.Markdown())
-	fmt.Fprintf(w, "\r\n--%s\r\n", filterReplyBoundary)
+	fmt.Fprint(w, markdownBody)
+	fmt.Fprintf(w, "\r\n--%s\r\n", boundary)
 	fmt.Fprint(w, "Content-Type: application/json; name=\"mailreceipt.json\"\r\n")
 	fmt.Fprint(w, "Content-Disposition: attachment; filename=\"mailreceipt.json\"\r\n")
 	fmt.Fprint(w, "Content-Transfer-Encoding: base64\r\n\r\n")
 	writeBase64Body(w, jsonBody)
-	fmt.Fprintf(w, "--%s--\r\n", filterReplyBoundary)
+	fmt.Fprintf(w, "--%s--\r\n", boundary)
 	return nil
+}
+
+// WO-22: production boundary source uses crypto randomness per generated reply.
+func randomFilterReplyBoundary() (string, error) {
+	raw := make([]byte, filterBoundaryRandomBytes)
+	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
+		return "", err
+	}
+	return filterReplyBoundaryPrefix + hex.EncodeToString(raw), nil
+}
+
+// WO-22: reject predictable or body-colliding MIME boundaries before writing.
+func filterReplyBoundary(parts ...string) (string, error) {
+	for attempt := 0; attempt < filterBoundaryMaxAttempts; attempt++ {
+		boundary, err := filterNewBoundary()
+		if err != nil {
+			return "", err
+		}
+		if !isSafeFilterReplyBoundary(boundary) || filterBoundaryLinePresent(boundary, parts...) {
+			continue
+		}
+		return boundary, nil
+	}
+	return "", fmt.Errorf("generate safe filter reply MIME boundary")
+}
+
+// WO-22: injected boundaries still must be safe for raw Content-Type use.
+func isSafeFilterReplyBoundary(boundary string) bool {
+	if boundary == filterLegacyReplyBoundary || len(boundary) > filterBoundaryMaxLength {
+		return false
+	}
+	if !strings.HasPrefix(boundary, filterReplyBoundaryPrefix) {
+		return false
+	}
+	for _, r := range boundary {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// WO-22: a boundary candidate is unsafe if any part can already delimit it.
+func filterBoundaryLinePresent(boundary string, parts ...string) bool {
+	marker := "--" + boundary
+	for _, part := range parts {
+		for {
+			line, rest, ok := strings.Cut(part, "\n")
+			line = strings.TrimSuffix(line, "\r")
+			if line == marker || line == marker+"--" {
+				return true
+			}
+			if !ok {
+				break
+			}
+			part = rest
+		}
+	}
+	return false
 }
 
 // WO-19: base64-wrap JSON attachments for strict MIME transports.
