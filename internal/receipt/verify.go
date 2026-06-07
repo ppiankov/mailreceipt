@@ -35,14 +35,31 @@ func (r Receipt) CitationCount() int {
 // This is what makes the receipt auditable: a fabricated or edited citation
 // cannot pass, because the literal line must exist in the source log.
 func (r Receipt) VerifyCitations(logText string) []string {
+	logLines := completeLogLines(logText)
 	var missing []string
 	for _, rr := range r.Result.Recipients {
 		if rr.Citation == "" {
 			continue
 		}
-		if !strings.Contains(logText, strings.TrimSpace(rr.Citation)) {
+		if _, ok := logLines[normalizeLogLine(rr.Citation)]; !ok {
 			missing = append(missing, rr.Citation)
 		}
 	}
 	return missing
+}
+
+func completeLogLines(logText string) map[string]struct{} {
+	lines := map[string]struct{}{}
+	for _, line := range strings.Split(logText, "\n") {
+		line = normalizeLogLine(line)
+		if line == "" {
+			continue
+		}
+		lines[line] = struct{}{}
+	}
+	return lines
+}
+
+func normalizeLogLine(line string) string {
+	return strings.TrimSpace(line)
 }

@@ -44,10 +44,38 @@ func TestVerifyCitationsPassesWhenPresent(t *testing.T) {
 	}
 }
 
+func TestVerifyCitationsPassesWithLineEndingAndOuterWhitespaceNormalization(t *testing.T) {
+	r := sampleReceipt()
+	log := "noise\r\n  " + r.Result.Recipients[0].Citation + "  \r\nmore noise\r\n"
+	if missing := r.VerifyCitations(log); len(missing) != 0 {
+		t.Fatalf("citation with equivalent outer whitespace should verify, missing=%v", missing)
+	}
+}
+
 func TestVerifyCitationsFailsWhenAbsent(t *testing.T) {
 	r := sampleReceipt()
 	if missing := r.VerifyCitations("a completely different log\n"); len(missing) != 1 {
 		t.Fatalf("a fabricated/edited citation must fail verification, got missing=%v", missing)
+	}
+}
+
+func TestVerifyCitationsFailsForTruncatedCitation(t *testing.T) {
+	r := sampleReceipt()
+	fullCitation := r.Result.Recipients[0].Citation
+	r.Result.Recipients[0].Citation = "postfix/smtp[20120]: 4F1A2B3C01: to=<a@client.test>, status=sent (250 2.0.0 OK)"
+	log := "noise\n" + fullCitation + "\nmore noise\n"
+	if missing := r.VerifyCitations(log); len(missing) != 1 {
+		t.Fatalf("truncated citation substring must fail verification, got missing=%v", missing)
+	}
+}
+
+func TestVerifyCitationsFailsForEditedCitation(t *testing.T) {
+	r := sampleReceipt()
+	fullCitation := r.Result.Recipients[0].Citation
+	r.Result.Recipients[0].Citation = strings.ReplaceAll(fullCitation, "250 2.0.0 OK", "250 2.0.0 ACCEPTED")
+	log := "noise\n" + fullCitation + "\nmore noise\n"
+	if missing := r.VerifyCitations(log); len(missing) != 1 {
+		t.Fatalf("edited citation must fail verification, got missing=%v", missing)
 	}
 }
 
