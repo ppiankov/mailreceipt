@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -18,7 +19,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const filterReplyBoundary = "mailreceipt-filter-reply"
+const (
+	filterReplyBoundary    = "mailreceipt-filter-reply"
+	filterBase64LineLength = 76 // WO-19: MIME base64 bodies are wrapped for transport safety.
+)
 
 func filterCmd() *cobra.Command {
 	var (
@@ -57,14 +61,23 @@ func filterCmd() *cobra.Command {
 				return nil
 			}
 
-			triggerSender := normalizeAddress(envelopeFrom)
+			triggerSender, ok := normalizeTrustedAddress(envelopeFrom)
+			if !ok {
+				return nil
+			}
 			if !domainAllowed(triggerSender, cfg.ReceiptFilter.Domains) {
 				return nil
 			}
-			replyFrom = normalizeAddress(replyFrom)
 			if replyFrom == "" {
 				// WO-16: keep generated replies RFC5322-complete even without explicit config.
 				replyFrom = "mailreceipt@" + addressDomain(triggerSender)
+			} else {
+				var ok bool
+				// WO-20: configured reply identity is trusted input, not a messy header.
+				replyFrom, ok = normalizeTrustedAddress(replyFrom)
+				if !ok {
+					return nil
+				}
 			}
 			if !domainAllowed(replyFrom, cfg.ReceiptFilter.Domains) {
 				return nil
@@ -137,7 +150,10 @@ func sharesFilterTeam(cfg config.ReceiptFilterConfig, triggerSender string, sent
 		triggerInTeam := false
 		ownerInTeam := map[string]bool{}
 		for _, m := range members {
-			addr := normalizeAddress(m)
+			addr, ok := normalizeTrustedAddress(m)
+			if !ok {
+				continue
+			}
 			if addr == triggerSender {
 				triggerInTeam = true
 			}
@@ -193,20 +209,46 @@ func normalizeAddress(v string) string {
 	if v == "" {
 		return ""
 	}
-	if addr, err := mail.ParseAddress(v); err == nil {
-		return strings.ToLower(addr.Address)
+	if addr, ok := normalizeTrustedAddress(v); ok {
+		return addr
 	}
-	if addrs, err := mail.ParseAddressList(v); err == nil && len(addrs) > 0 {
-		return strings.ToLower(addrs[0].Address)
+	if addrs, err := mail.ParseAddressList(v); err == nil {
+		for _, addr := range addrs {
+			if normalized, ok := normalizeMailboxAddress(addr.Address); ok {
+				return normalized
+			}
+		}
 	}
 	for _, tok := range strings.FieldsFunc(v, func(r rune) bool {
 		return r == ' ' || r == ',' || r == ';' || r == '<' || r == '>' || r == '\'' || r == '"'
 	}) {
-		if strings.Contains(tok, "@") {
-			return strings.ToLower(strings.TrimSpace(tok))
+		if addr, ok := normalizeTrustedAddress(tok); ok {
+			return addr
 		}
 	}
-	return strings.ToLower(v)
+	return ""
+}
+
+// WO-20: trusted sender identities must be valid single mailbox addresses.
+func normalizeTrustedAddress(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", false
+	}
+	addrs, err := mail.ParseAddressList(v)
+	if err != nil || len(addrs) != 1 {
+		return "", false
+	}
+	return normalizeMailboxAddress(addrs[0].Address)
+}
+
+func normalizeMailboxAddress(addr string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(addr))
+	at := strings.Index(normalized, "@")
+	if at <= 0 || at != strings.LastIndex(normalized, "@") || at == len(normalized)-1 {
+		return "", false
+	}
+	return normalized, true
 }
 
 func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.Receipt) error {
@@ -232,10 +274,22 @@ func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.R
 	fmt.Fprintf(w, "\r\n--%s\r\n", filterReplyBoundary)
 	fmt.Fprint(w, "Content-Type: application/json; name=\"mailreceipt.json\"\r\n")
 	fmt.Fprint(w, "Content-Disposition: attachment; filename=\"mailreceipt.json\"\r\n")
-	fmt.Fprint(w, "Content-Transfer-Encoding: 7bit\r\n\r\n")
-	fmt.Fprintln(w, string(jsonBody))
+	fmt.Fprint(w, "Content-Transfer-Encoding: base64\r\n\r\n")
+	writeBase64Body(w, jsonBody)
 	fmt.Fprintf(w, "--%s--\r\n", filterReplyBoundary)
 	return nil
+}
+
+// WO-19: base64-wrap JSON attachments for strict MIME transports.
+func writeBase64Body(w io.Writer, raw []byte) {
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	for len(encoded) > filterBase64LineLength {
+		fmt.Fprintf(w, "%s\r\n", encoded[:filterBase64LineLength])
+		encoded = encoded[filterBase64LineLength:]
+	}
+	if encoded != "" {
+		fmt.Fprintf(w, "%s\r\n", encoded)
+	}
 }
 
 func sanitizeHeader(s string) string {
