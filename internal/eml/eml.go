@@ -66,6 +66,8 @@ func parseRFC822(raw []byte) (Email, bool) {
 		return Email{}, false
 	}
 	h := msg.Header
+	// WO-8: mail.ReadMessage can accept pasted Outlook-style blocks, so honor
+	// Sent here before recipient fallback depends on the parsed send time.
 	dateRaw := h.Get("Date")
 	if dateRaw == "" {
 		dateRaw = h.Get("Sent")

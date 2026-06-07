@@ -130,6 +130,38 @@ func TestRecipientFallbackRequiresDateWhenNoMessageID(t *testing.T) {
 	}
 }
 
+func TestPastedUnparseableDateReturnsNotFoundEndToEnd(t *testing.T) {
+	// WO-15: raw pasted input must not reopen unbounded recipient fallback.
+	raw := `From: Anna Petrova <anna@ip.test>
+Sent: definitely not a date
+To: jdoe@exampleclient.test
+Subject: matter
+
+Body
+`
+	e, err := eml.Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.MessageID != "" {
+		t.Fatalf("pasted block has no message-id, got %q", e.MessageID)
+	}
+	if !e.Date.IsZero() {
+		t.Fatalf("unparseable pasted date should leave date zero, got %s", e.Date)
+	}
+	res := Analyze(e, parseLog(t, sampleLog))
+	jdoe := find(res, "jdoe@exampleclient.test")
+	if jdoe.Outcome != NotFound {
+		t.Fatalf("raw pasted unparseable date: want not_found, got %s", jdoe.Outcome)
+	}
+	if jdoe.Match != MatchNone {
+		t.Fatalf("raw pasted unparseable date: want no match, got %s", jdoe.Match)
+	}
+	if jdoe.Citation != "" {
+		t.Fatalf("not_found must carry no citation, got: %s", jdoe.Citation)
+	}
+}
+
 func TestRecipientFallbackRejectsEventsOutsideWindow(t *testing.T) {
 	e := eml.Email{
 		To:   []string{"jdoe@exampleclient.test"},
