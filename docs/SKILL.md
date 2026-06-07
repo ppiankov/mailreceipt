@@ -62,6 +62,40 @@ the mail server's own disposition, quoted, never a model's interpretation.
 - 0: analysis succeeded (any outcome, including bounced or not_found, is exit 0)
 - 1: could not analyze (email unparseable, no recipients, log unreadable, bad --format)
 
+### mailreceipt filter
+
+Reads an email trigger on stdin, extracts the forwarded sent message, and writes
+a reply email containing the cited receipt when the trigger is authorized.
+
+```bash
+mailreceipt filter --envelope-from "$SENDER" --log /var/log/mail.log
+```
+
+**Flags:**
+- `--envelope-from addr` — MTA-authenticated envelope sender for the trigger email
+- `--log path` — path to the Postfix mail log, or set `log` in `.mailreceipt.yml`
+- `--log-year int` — year for year-less BSD syslog timestamps
+- `--case string` — case/matter reference stamped on the receipt
+
+Configure the internal domains and ownership teams in `.mailreceipt.yml`:
+
+```yaml
+receipt_filter:
+  domains: [acme.test]
+  teams:
+    docketing:
+      members: [docketing@acme.test, assistant1@acme.test, attorney1@acme.test]
+```
+
+Alias wiring must pass the MTA-provided authenticated envelope sender. Do not use
+the trigger email's `From:` header for authorization. Ask users to forward the
+original sent message as an `.eml` / `message/rfc822` attachment; inline forwards
+are only a fallback and may return `not_found` when the Message-ID or sent time is
+lost.
+
+Unauthorized trigger senders, team mismatches, automatic/bulk messages, malformed
+requests, and unreadable logs fail closed with no reply.
+
 ### mailreceipt verify
 
 Re-checks a JSON receipt against a fresh read of the log: every cited line must

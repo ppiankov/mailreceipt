@@ -66,3 +66,31 @@ func TestLoadStripsQuotesAndIgnoresCommentsAndUnknownKeys(t *testing.T) {
 		t.Fatalf("log_year, got %d", c.LogYear)
 	}
 }
+
+func TestLoadReceiptFilterConfig(t *testing.T) {
+	p := filepath.Join(t.TempDir(), FileName)
+	body := `log: ./mail.log
+receipt_filter:
+  domains: [acme.test]
+  teams:
+    docketing:
+      members: [docketing@acme.test, Assistant1@acme.test, attorney1@acme.test]
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, _, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.ReceiptFilter.Domains) != 1 || c.ReceiptFilter.Domains[0] != "acme.test" {
+		t.Fatalf("receipt_filter domains: got %v", c.ReceiptFilter.Domains)
+	}
+	members := c.ReceiptFilter.Teams["docketing"]
+	if len(members) != 3 {
+		t.Fatalf("receipt_filter team members: got %v", members)
+	}
+	if members[1] != "assistant1@acme.test" {
+		t.Fatalf("members should normalize case, got %v", members)
+	}
+}

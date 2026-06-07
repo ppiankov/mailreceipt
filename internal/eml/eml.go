@@ -20,6 +20,7 @@ import (
 type Email struct {
 	MessageID string    `json:"message_id,omitempty"`
 	From      string    `json:"from,omitempty"`
+	Sender    string    `json:"sender,omitempty"` // WO-13: ownership header for forwarded sent-message receipts
 	To        []string  `json:"to,omitempty"`
 	Cc        []string  `json:"cc,omitempty"`
 	Subject   string    `json:"subject,omitempty"`
@@ -75,6 +76,7 @@ func parseRFC822(raw []byte) (Email, bool) {
 	e := Email{
 		MessageID: normalizeMessageID(h.Get("Message-Id")),
 		From:      h.Get("From"),
+		Sender:    h.Get("Sender"),
 		Subject:   h.Get("Subject"),
 		To:        splitAddrs(h.Get("To")),
 		Cc:        splitAddrs(h.Get("Cc")),
@@ -104,6 +106,8 @@ func parseLenient(raw []byte) Email {
 			e.MessageID = normalizeMessageID(after(ln, ":"))
 		case strings.HasPrefix(lower, "from:") && e.From == "":
 			e.From = after(ln, ":")
+		case strings.HasPrefix(lower, "sender:") && e.Sender == "":
+			e.Sender = after(ln, ":")
 		case strings.HasPrefix(lower, "to:") && len(e.To) == 0:
 			e.To = splitAddrs(after(ln, ":"))
 		case strings.HasPrefix(lower, "cc:") && len(e.Cc) == 0:

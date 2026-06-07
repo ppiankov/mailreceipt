@@ -118,6 +118,33 @@ message or a pasted top-of-thread block (the messy `From:/Sent:/To:` forwarded
 format). When there is no `Message-ID`, it falls back to recipient + time-window
 matching.
 
+## Receipt-by-email filter
+
+`mailreceipt filter` is for an internal alias such as `receipt@yourdomain.test`.
+It reads the trigger email on stdin and writes a reply email only when the
+authenticated envelope sender is allowed by `.mailreceipt.yml`.
+
+```yaml
+receipt_filter:
+  domains: [acme.test]
+  teams:
+    docketing:
+      members: [docketing@acme.test, assistant1@acme.test, attorney1@acme.test]
+```
+
+Wire the alias so the MTA passes its authenticated envelope sender, not the
+forgeable `From:` header:
+
+```sh
+mailreceipt filter --envelope-from "$SENDER" --log /var/log/mail.log
+```
+
+Forward the original sent message as an `.eml` / `message/rfc822` attachment.
+Inline forwards are tolerated for pasted-header workflows, but attachments
+preserve the Message-ID and keep correlation exact. Unauthorized senders, team
+mismatches, loops (`Auto-Submitted` or `Precedence: bulk`), and malformed
+requests produce no reply.
+
 ## Failure modes
 
 - Pasted top-of-thread blocks with no `Message-ID` use recipient + parsed send
