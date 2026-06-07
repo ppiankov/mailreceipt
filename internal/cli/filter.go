@@ -26,6 +26,7 @@ func filterCmd() *cobra.Command {
 		logYear      int
 		caseRef      string
 		envelopeFrom string
+		replyFrom    string
 	)
 	cmd := &cobra.Command{
 		Use:   "filter",
@@ -44,6 +45,9 @@ func filterCmd() *cobra.Command {
 			if cfg.CasePrefix != "" {
 				caseRef = cfg.CasePrefix + caseRef
 			}
+			if replyFrom == "" && !cmd.Flags().Changed("from") {
+				replyFrom = cfg.ReceiptFilter.ReplyFrom
+			}
 
 			raw, err := io.ReadAll(cmd.InOrStdin())
 			if err != nil {
@@ -55,6 +59,14 @@ func filterCmd() *cobra.Command {
 
 			triggerSender := normalizeAddress(envelopeFrom)
 			if !domainAllowed(triggerSender, cfg.ReceiptFilter.Domains) {
+				return nil
+			}
+			replyFrom = normalizeAddress(replyFrom)
+			if replyFrom == "" {
+				// WO-16: keep generated replies RFC5322-complete even without explicit config.
+				replyFrom = "mailreceipt@" + addressDomain(triggerSender)
+			}
+			if !domainAllowed(replyFrom, cfg.ReceiptFilter.Domains) {
 				return nil
 			}
 			forwarded, err := eml.ExtractForwardedEmail(raw)
@@ -82,15 +94,19 @@ func filterCmd() *cobra.Command {
 			}
 			res := deliver.Analyze(e, log)
 			rec := receipt.New(res, caseRef, time.Time{})
-			return writeFilterReply(cmd.OutOrStdout(), triggerSender, rec)
+			return writeFilterReply(cmd.OutOrStdout(), triggerSender, replyFrom, filterNow(), rec)
 		},
 	}
 	cmd.Flags().StringVar(&envelopeFrom, "envelope-from", "", "MTA-authenticated envelope sender for the trigger email")
+	cmd.Flags().StringVar(&replyFrom, "from", "", "From address for generated receipt replies")
 	cmd.Flags().StringVar(&logPath, "log", "", "path to the Postfix mail log")
 	cmd.Flags().StringVar(&caseRef, "case", "", "case/matter reference to stamp on the receipt")
 	cmd.Flags().IntVar(&logYear, "log-year", 0, "year for the year-less syslog timestamps (default 2026)")
 	return cmd
 }
+
+// WO-16: injectable clock keeps reply Date tests deterministic.
+var filterNow = time.Now
 
 func filterLoopGuard(raw []byte) bool {
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
@@ -105,37 +121,51 @@ func filterLoopGuard(raw []byte) bool {
 }
 
 func sharesFilterTeam(cfg config.ReceiptFilterConfig, triggerSender string, sent eml.Email) bool {
-	owner := sent.Sender
-	if owner == "" {
-		owner = sent.From
-	}
-	ownerAddr := normalizeAddress(owner)
-	if triggerSender == "" || ownerAddr == "" {
-		return false
-	}
-	if !domainAllowed(ownerAddr, cfg.Domains) {
+	owners := filterOwnerAddresses(sent)
+	if triggerSender == "" || len(owners) == 0 {
 		return false
 	}
 	if len(cfg.Teams) == 0 {
-		return addressDomain(triggerSender) == addressDomain(ownerAddr)
+		for _, ownerAddr := range owners {
+			if domainAllowed(ownerAddr, cfg.Domains) && addressDomain(triggerSender) == addressDomain(ownerAddr) {
+				return true
+			}
+		}
+		return false
 	}
 	for _, members := range cfg.Teams {
 		triggerInTeam := false
-		ownerInTeam := false
+		ownerInTeam := map[string]bool{}
 		for _, m := range members {
 			addr := normalizeAddress(m)
 			if addr == triggerSender {
 				triggerInTeam = true
 			}
-			if addr == ownerAddr {
-				ownerInTeam = true
+			for _, ownerAddr := range owners {
+				if domainAllowed(ownerAddr, cfg.Domains) && addr == ownerAddr {
+					ownerInTeam[ownerAddr] = true
+				}
 			}
 		}
-		if triggerInTeam && ownerInTeam {
+		if triggerInTeam && len(ownerInTeam) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+func filterOwnerAddresses(sent eml.Email) []string {
+	// WO-17: From and Sender are independent ownership candidates.
+	seen := map[string]bool{}
+	var owners []string
+	for _, candidate := range []string{sent.From, sent.Sender} {
+		addr := normalizeAddress(candidate)
+		if addr != "" && !seen[addr] {
+			seen[addr] = true
+			owners = append(owners, addr)
+		}
+	}
+	return owners
 }
 
 func domainAllowed(addr string, domains []string) bool {
@@ -179,7 +209,7 @@ func normalizeAddress(v string) string {
 	return strings.ToLower(v)
 }
 
-func writeFilterReply(w io.Writer, to string, rec receipt.Receipt) error {
+func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.Receipt) error {
 	jsonBody, err := rec.JSON()
 	if err != nil {
 		return err
@@ -188,7 +218,9 @@ func writeFilterReply(w io.Writer, to string, rec receipt.Receipt) error {
 	if rec.Result.Subject != "" {
 		subject += ": " + rec.Result.Subject
 	}
+	fmt.Fprintf(w, "From: %s\r\n", sanitizeHeader(from))
 	fmt.Fprintf(w, "To: %s\r\n", sanitizeHeader(to))
+	fmt.Fprintf(w, "Date: %s\r\n", now.UTC().Format(time.RFC1123Z))
 	fmt.Fprintf(w, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", sanitizeHeader(subject)))
 	fmt.Fprint(w, "Auto-Submitted: auto-generated\r\n")
 	fmt.Fprint(w, "MIME-Version: 1.0\r\n")

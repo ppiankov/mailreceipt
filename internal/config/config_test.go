@@ -72,6 +72,7 @@ func TestLoadReceiptFilterConfig(t *testing.T) {
 	body := `log: ./mail.log
 receipt_filter:
   domains: [acme.test]
+  reply_from: receipt@acme.test
   teams:
     docketing:
       members: [docketing@acme.test, Assistant1@acme.test, attorney1@acme.test]
@@ -85,6 +86,9 @@ receipt_filter:
 	}
 	if len(c.ReceiptFilter.Domains) != 1 || c.ReceiptFilter.Domains[0] != "acme.test" {
 		t.Fatalf("receipt_filter domains: got %v", c.ReceiptFilter.Domains)
+	}
+	if c.ReceiptFilter.ReplyFrom != "receipt@acme.test" {
+		t.Fatalf("receipt_filter reply_from: got %q", c.ReceiptFilter.ReplyFrom)
 	}
 	members := c.ReceiptFilter.Teams["docketing"]
 	if len(members) != 3 {

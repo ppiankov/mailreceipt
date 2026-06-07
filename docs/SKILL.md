@@ -68,11 +68,12 @@ Reads an email trigger on stdin, extracts the forwarded sent message, and writes
 a reply email containing the cited receipt when the trigger is authorized.
 
 ```bash
-mailreceipt filter --envelope-from "$SENDER" --log /var/log/mail.log
+mailreceipt filter --envelope-from "$SENDER" --from receipt@acme.test --log /var/log/mail.log
 ```
 
 **Flags:**
 - `--envelope-from addr` — MTA-authenticated envelope sender for the trigger email
+- `--from addr` — From address for generated receipt replies
 - `--log path` — path to the Postfix mail log, or set `log` in `.mailreceipt.yml`
 - `--log-year int` — year for year-less BSD syslog timestamps
 - `--case string` — case/matter reference stamped on the receipt
@@ -82,6 +83,7 @@ Configure the internal domains and ownership teams in `.mailreceipt.yml`:
 ```yaml
 receipt_filter:
   domains: [acme.test]
+  reply_from: receipt@acme.test
   teams:
     docketing:
       members: [docketing@acme.test, assistant1@acme.test, attorney1@acme.test]
@@ -91,10 +93,12 @@ Alias wiring must pass the MTA-provided authenticated envelope sender. Do not us
 the trigger email's `From:` header for authorization. Ask users to forward the
 original sent message as an `.eml` / `message/rfc822` attachment; inline forwards
 are only a fallback and may return `not_found` when the Message-ID or sent time is
-lost.
+lost. Base64 and quoted-printable encoded forwarded `.eml` attachments are
+supported when the part is `message/rfc822` or has a clear `.eml` filename.
 
 Unauthorized trigger senders, team mismatches, automatic/bulk messages, malformed
-requests, and unreadable logs fail closed with no reply.
+requests, unreadable forwarded attachments, and unreadable logs fail closed with
+no reply.
 
 ### mailreceipt verify
 

@@ -30,6 +30,8 @@ type Config struct {
 type ReceiptFilterConfig struct {
 	Domains []string            // WO-13: internal domains accepted as authenticated envelope senders
 	Teams   map[string][]string // WO-13: named ownership groups for trigger sender and sent-message owner
+	// WO-16: reply From address for generated filter responses.
+	ReplyFrom string
 }
 
 // Load reads cfgPath. A missing file is not an error: it returns an empty Config
@@ -71,6 +73,8 @@ func Load(cfgPath string) (Config, bool, error) {
 			switch {
 			case indent == 2 && key == "domains":
 				c.ReceiptFilter.Domains = parseList(val)
+			case indent == 2 && key == "reply_from":
+				c.ReceiptFilter.ReplyFrom = val
 			case indent == 2 && key == "teams":
 				inTeams = true
 				ensureTeams(&c)
@@ -160,6 +164,7 @@ case_prefix: ""
 # receipt_filter: optional inbound alias filter for forwarded sent-message requests
 # receipt_filter:
 #   domains: [example.test]
+#   reply_from: receipt@example.test
 #   teams:
 #     docketing:
 #       members: [docketing@example.test, attorney@example.test]

@@ -127,6 +127,7 @@ authenticated envelope sender is allowed by `.mailreceipt.yml`.
 ```yaml
 receipt_filter:
   domains: [acme.test]
+  reply_from: receipt@acme.test
   teams:
     docketing:
       members: [docketing@acme.test, assistant1@acme.test, attorney1@acme.test]
@@ -136,14 +137,16 @@ Wire the alias so the MTA passes its authenticated envelope sender, not the
 forgeable `From:` header:
 
 ```sh
-mailreceipt filter --envelope-from "$SENDER" --log /var/log/mail.log
+mailreceipt filter --envelope-from "$SENDER" --from receipt@acme.test --log /var/log/mail.log
 ```
 
 Forward the original sent message as an `.eml` / `message/rfc822` attachment.
 Inline forwards are tolerated for pasted-header workflows, but attachments
-preserve the Message-ID and keep correlation exact. Unauthorized senders, team
-mismatches, loops (`Auto-Submitted` or `Precedence: bulk`), and malformed
-requests produce no reply.
+preserve the Message-ID and keep correlation exact. Base64 or quoted-printable
+encoded `.eml` attachments are supported when the attachment is explicitly a
+sent message (`message/rfc822` or a `.eml` filename). Unauthorized senders, team
+mismatches, loops (`Auto-Submitted` or `Precedence: bulk`), malformed requests,
+and unreadable forwarded attachments produce no reply.
 
 ## Failure modes
 

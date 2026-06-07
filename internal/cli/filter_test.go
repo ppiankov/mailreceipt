@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const filterLog = `Jun  5 15:09:02 mail01 postfix/cleanup[20420]: ABCDEF1: message-id=<sent-1@acme.test>
@@ -17,6 +19,7 @@ Jun  5 15:09:21 mail01 postfix/smtp[20441]: ABCDEF2: to=<ghost@example.test>, re
 const filterConfig = `log_year: 2026
 receipt_filter:
   domains: [acme.test]
+  reply_from: receipt@acme.test
   teams:
     docketing:
       members: [docketing@acme.test, attorney1@acme.test]
@@ -27,8 +30,18 @@ func TestFilterHappyPathWritesReplyEmail(t *testing.T) {
 	if !strings.Contains(out, "Auto-Submitted: auto-generated") {
 		t.Fatalf("reply must carry loop-prevention header, got:\n%s", out)
 	}
+	msg, err := mail.ReadMessage(strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("reply should be a parseable message: %v\n%s", err, out)
+	}
+	if got := msg.Header.Get("From"); got != "receipt@acme.test" {
+		t.Fatalf("reply From: got %q", got)
+	}
 	if !strings.Contains(out, "To: docketing@acme.test") {
 		t.Fatalf("reply should go to authenticated envelope sender, got:\n%s", out)
+	}
+	if _, err := mail.ParseDate(msg.Header.Get("Date")); err != nil {
+		t.Fatalf("reply Date should be RFC5322-parseable, got %q: %v", msg.Header.Get("Date"), err)
 	}
 	if !strings.Contains(out, "status=sent") || !strings.Contains(out, `"outcome": "delivered"`) {
 		t.Fatalf("happy path should include cited delivered outcome, got:\n%s", out)
@@ -96,8 +109,59 @@ func TestFilterLoopGuardDropsAutoSubmitted(t *testing.T) {
 	}
 }
 
+func TestFilterAuthorizesWhenFromSharesTeamEvenIfSenderDoesNot(t *testing.T) {
+	sent := sentMailWithHeaders("sent-1@acme.test", "client@example.test",
+		"From: Attorney <attorney1@acme.test>\nSender: Other <other@acme.test>")
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sent), filterConfig)
+	if !strings.Contains(out, `"outcome": "delivered"`) {
+		t.Fatalf("From sharing team should authorize even when Sender does not, got:\n%s", out)
+	}
+}
+
+func TestFilterAuthorizesWhenSenderSharesTeam(t *testing.T) {
+	sent := sentMailWithHeaders("sent-1@acme.test", "client@example.test",
+		"From: Other <other@acme.test>\nSender: Attorney <attorney1@acme.test>")
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sent), filterConfig)
+	if !strings.Contains(out, `"outcome": "delivered"`) {
+		t.Fatalf("Sender sharing team should authorize, got:\n%s", out)
+	}
+}
+
+func TestFilterDropsWhenNeitherFromNorSenderSharesTeam(t *testing.T) {
+	sent := sentMailWithHeaders("sent-1@acme.test", "client@example.test",
+		"From: Other <other@acme.test>\nSender: Outside <outside@acme.test>")
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sent), filterConfig)
+	if out != "" {
+		t.Fatalf("neither From nor Sender sharing team should drop, got:\n%s", out)
+	}
+}
+
+func TestFilterUsesWholeDomainWhenNoTeamsConfigured(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [acme.test]
+`
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), cfg)
+	if !strings.Contains(out, `"outcome": "delivered"`) {
+		t.Fatalf("no teams should fall back to whole-domain authorization, got:\n%s", out)
+	}
+}
+
+func TestFilterLoopGuardDropsPrecedenceBulk(t *testing.T) {
+	trigger := "Precedence: bulk\n" + triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test"))
+	out := runFilter(t, "docketing@acme.test", trigger, filterConfig)
+	if out != "" {
+		t.Fatalf("bulk trigger should be silently dropped, got:\n%s", out)
+	}
+}
+
 func runFilter(t *testing.T, envelopeFrom, trigger, cfg string) string {
 	t.Helper()
+	oldNow := filterNow
+	filterNow = func() time.Time {
+		return time.Date(2026, 6, 7, 14, 2, 0, 0, time.UTC)
+	}
+	t.Cleanup(func() { filterNow = oldNow })
+
 	dir := t.TempDir()
 	t.Chdir(dir)
 	logPath := filepath.Join(dir, "mail.log")
@@ -141,7 +205,11 @@ Content-Disposition: attachment; filename="sent.eml"
 }
 
 func sentMail(messageID, recipient string) string {
-	return `From: Attorney <attorney1@acme.test>
+	return sentMailWithHeaders(messageID, recipient, "From: Attorney <attorney1@acme.test>")
+}
+
+func sentMailWithHeaders(messageID, recipient, headers string) string {
+	return headers + `
 To: ` + recipient + `
 Subject: Filing
 Date: Fri, 5 Jun 2026 15:09:00 +0000
