@@ -21,7 +21,8 @@ import (
 
 const (
 	filterReplyBoundary    = "mailreceipt-filter-reply"
-	filterBase64LineLength = 76 // WO-19: MIME base64 bodies are wrapped for transport safety.
+	filterBase64LineLength = 76                    // WO-19: MIME base64 bodies are wrapped for transport safety.
+	safeMailboxLocalChars  = "!#$%&'*+-/=?^_`{|}~" // WO-21: dot-atom symbols allowed in trusted local-parts.
 )
 
 func filterCmd() *cobra.Command {
@@ -248,7 +249,55 @@ func normalizeMailboxAddress(addr string) (string, bool) {
 	if at <= 0 || at != strings.LastIndex(normalized, "@") || at == len(normalized)-1 {
 		return "", false
 	}
+	if !isSafeMailboxLocal(normalized[:at]) || !isSafeMailboxDomain(normalized[at+1:]) {
+		return "", false
+	}
 	return normalized, true
+}
+
+// WO-21: trusted identities must be safe to write as simple mailbox headers.
+func isSafeMailboxLocal(local string) bool {
+	if local == "" || strings.HasPrefix(local, ".") || strings.HasSuffix(local, ".") || strings.Contains(local, "..") {
+		return false
+	}
+	for _, r := range local {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r == '.' || strings.ContainsRune(safeMailboxLocalChars, r) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// WO-21: trusted domains are limited to simple DNS labels before raw header use.
+func isSafeMailboxDomain(domain string) bool {
+	if domain == "" || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || strings.Contains(domain, "..") {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if r >= 'a' && r <= 'z' {
+				continue
+			}
+			if r >= '0' && r <= '9' {
+				continue
+			}
+			if r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.Receipt) error {

@@ -186,6 +186,15 @@ func TestFilterDropsMalformedFromFlag(t *testing.T) {
 	}
 }
 
+// WO-21: quoted local-parts are not emitted as raw trusted reply headers.
+func TestFilterDropsQuotedLocalPartFromFlag(t *testing.T) {
+	out := runFilterWithArgs(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), filterConfig,
+		"--from", `Receipts <"receipt bot"@acme.test>`)
+	if out != "" {
+		t.Fatalf("quoted-local --from should be silently dropped, got:\n%s", out)
+	}
+}
+
 // WO-20: configured reply identities use the same strict parser as --from.
 func TestFilterDropsMalformedConfigReplyFrom(t *testing.T) {
 	cfg := `receipt_filter:
@@ -198,6 +207,21 @@ func TestFilterDropsMalformedConfigReplyFrom(t *testing.T) {
 	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), cfg)
 	if out != "" {
 		t.Fatalf("malformed receipt_filter.reply_from should be silently dropped, got:\n%s", out)
+	}
+}
+
+// WO-21: config reply_from cannot normalize to an unsafe raw From value.
+func TestFilterDropsQuotedLocalPartConfigReplyFrom(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [acme.test]
+  reply_from: "receipt bot"@acme.test
+  teams:
+    docketing:
+      members: [docketing@acme.test, attorney1@acme.test]
+`
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), cfg)
+	if out != "" {
+		t.Fatalf("quoted-local receipt_filter.reply_from should be silently dropped, got:\n%s", out)
 	}
 }
 
