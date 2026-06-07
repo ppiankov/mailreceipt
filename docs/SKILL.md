@@ -34,7 +34,7 @@ outcome: a recipient with no matching log line is reported `not_found`.
   "summary": "mixed",
   "summary_counts": {"delivered": 4, "not_found": 1},
   "result": {
-    "message_id": "09f201dcf508@acme.test",
+    "message_id": "sent-0001@acme.test",
     "subject": "RE: reminder",
     "recipients": [
       {
