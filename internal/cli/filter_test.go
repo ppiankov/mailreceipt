@@ -101,6 +101,28 @@ func TestFilterTextPartIsQuotedPrintablePlainReceipt(t *testing.T) {
 	}
 }
 
+// WO-25: decoded forwarded-message subjects feed both the plain body and reply header.
+func TestFilterDecodesRFC2047SubjectInReply(t *testing.T) {
+	sent := sentMailWithSubject("sent-1@acme.test", "client@example.test", "=?koi8-r?B?8NLJ18XU?=")
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sent), filterConfig)
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "  Subject: Привет") {
+		t.Fatalf("reply text should include decoded subject, got:\n%s", textBody)
+	}
+	msg, err := mail.ReadMessage(strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("reply should be a parseable message: %v\n%s", err, out)
+	}
+	var subjectDecoder mime.WordDecoder
+	subject, err := subjectDecoder.DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatalf("reply subject should decode: %v", err)
+	}
+	if subject != "Mail delivery receipt: Привет" {
+		t.Fatalf("reply subject: want %q, got %q", "Mail delivery receipt: Привет", subject)
+	}
+}
+
 // WO-22: generated reply boundaries replace the legacy static delimiter.
 func TestFilterUsesGeneratedBoundaryAndIgnoresLegacySubjectBoundary(t *testing.T) {
 	boundary := filterReplyBoundaryPrefix + "00112233445566778899aabbccddeeff"

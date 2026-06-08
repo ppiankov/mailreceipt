@@ -10,10 +10,14 @@ package eml
 
 import (
 	"bufio"
+	"fmt"
 	"io"
+	"mime"
 	"net/mail"
 	"strings"
 	"time"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // Email is the addressing metadata we use to find delivery events.
@@ -32,6 +36,8 @@ var lenientDateLayouts = []string{
 	"Monday, January 2, 2006 3:04 PM",
 	"Monday, January 2, 2006 3:04:05 PM",
 }
+
+var subjectWordDecoder = &mime.WordDecoder{CharsetReader: subjectCharsetReader}
 
 // Recipients returns To + Cc addresses, lowercased and de-duplicated.
 func (e Email) Recipients() []string {
@@ -77,7 +83,7 @@ func parseRFC822(raw []byte) (Email, bool) {
 		MessageID: normalizeMessageID(h.Get("Message-Id")),
 		From:      h.Get("From"),
 		Sender:    h.Get("Sender"),
-		Subject:   h.Get("Subject"),
+		Subject:   decodeSubjectHeader(h.Get("Subject")),
 		To:        splitAddrs(h.Get("To")),
 		Cc:        splitAddrs(h.Get("Cc")),
 		DateRaw:   dateRaw,
@@ -113,7 +119,7 @@ func parseLenient(raw []byte) Email {
 		case strings.HasPrefix(lower, "cc:") && len(e.Cc) == 0:
 			e.Cc = splitAddrs(after(ln, ":"))
 		case strings.HasPrefix(lower, "subject:") && e.Subject == "":
-			e.Subject = after(ln, ":")
+			e.Subject = decodeSubjectHeader(after(ln, ":"))
 		case (strings.HasPrefix(lower, "sent:") || strings.HasPrefix(lower, "date:")) && e.DateRaw == "":
 			e.DateRaw = after(ln, ":")
 			if t, ok := parseLenientDate(e.DateRaw); ok {
@@ -122,6 +128,30 @@ func parseLenient(raw []byte) Email {
 		}
 	}
 	return e
+}
+
+// decodeSubjectHeader decodes RFC 2047 encoded-words for readable receipts.
+// WO-25: non-UTF-8 Russian mail subjects need explicit deterministic charset readers.
+func decodeSubjectHeader(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	decoded, err := subjectWordDecoder.DecodeHeader(raw)
+	if err != nil {
+		return raw
+	}
+	return decoded
+}
+
+func subjectCharsetReader(charset string, input io.Reader) (io.Reader, error) {
+	switch strings.ToLower(strings.TrimSpace(charset)) {
+	case "koi8-r", "koi8r":
+		return charmap.KOI8R.NewDecoder().Reader(input), nil
+	case "windows-1251", "cp1251", "x-cp1251":
+		return charmap.Windows1251.NewDecoder().Reader(input), nil
+	default:
+		return nil, fmt.Errorf("unsupported subject charset %q", charset)
+	}
 }
 
 func parseLenientDate(raw string) (time.Time, bool) {

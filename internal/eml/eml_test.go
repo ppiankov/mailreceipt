@@ -29,6 +29,41 @@ body here
 	}
 }
 
+// WO-25: receipt subjects should be readable even when the original mail uses MIME encoded-words.
+func TestParseRFC2047Subjects(t *testing.T) {
+	tests := []struct {
+		name    string
+		subject string
+		want    string
+	}{
+		{name: "plain ascii", subject: "Re: matter", want: "Re: matter"},
+		{name: "plain utf8", subject: "Привет", want: "Привет"},
+		{name: "utf8 encoded word", subject: "=?UTF-8?B?0J/RgNC40LLQtdGC?=", want: "Привет"},
+		{name: "koi8r encoded word", subject: "=?koi8-r?B?8NLJ18XU?=", want: "Привет"},
+		{name: "windows1251 encoded word", subject: "=?windows-1251?B?z/Do4uXy?=", want: "Привет"},
+		{name: "unknown charset fallback", subject: "=?x-unknown?B?8NLJ18XU?=", want: "=?x-unknown?B?8NLJ18XU?="},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `From: Anna <anna@ip.test>
+To: jdoe@client.test
+Subject: ` + tt.subject + `
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <abc@ip.test>
+
+body here
+`
+			e, err := Parse(strings.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.Subject != tt.want {
+				t.Fatalf("subject: want %q, got %q", tt.want, e.Subject)
+			}
+		})
+	}
+}
+
 func TestParseLenientPastedBlock(t *testing.T) {
 	// No real Message-ID; pasted forwarded headers.
 	raw := `From: Anna Petrova <anna@ip.test>
