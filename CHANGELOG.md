@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-06-08
+
+### Added
+- `filter` command — a mail-filter front door. Forward a sent email (the original
+  attached as `message/rfc822`) to an alias, and mailreceipt replies to the sender
+  with a cited delivery receipt. Authorization is the core: it acts only on an
+  MTA-authenticated internal envelope sender, only when the trigger sender shares a
+  configured `receipt_filter` team with the attachment's `From`/`Sender`, and only
+  when the attachment's Message-ID correlates to a real local-log line — the
+  attachment is a selector, never evidence. Fails closed (silent drop) on any
+  unmet gate, with a loop guard (`Auto-Submitted`, `Precedence: bulk`).
+- `receipt_filter` config block in `.mailreceipt.yml` (domains, teams, reply_from).
+
+### Fixed
+- **Citation verification now requires an exact full-line match.** Previously a
+  truncated or edited citation could pass `verify` as long as it was any substring
+  of a real log line — weakening the tamper-evidence guarantee. Citations must now
+  match a complete source log line.
+- **Recipient fallback is now time-bounded or `not_found`, never unbounded.** A
+  pasted thread with no Message-ID and no parsable date previously searched the
+  whole log and could assert a false `delivered`/`bounced` from an unrelated event
+  for the same recipient. With no Message-ID and no parsable send time, the outcome
+  is now `not_found` — the honest answer. Lenient `Sent:`/`Date:` values are parsed
+  to bound the recipient-window correlation.
+
+### Security
+- The `filter` reply path is hardened: random per-reply MIME boundary, strict
+  single-mailbox parsing for trusted reply identities (rejecting quoted/obsolete
+  local-parts before they reach a raw `From:` header), base64-encoded JSON
+  attachment, and a documented trust-boundary "Security model" section. An empty
+  `--envelope-from` is an explicit fail-closed drop.
+
 ## [0.3.0] - 2026-06-06
 
 ### Added
