@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -104,6 +105,68 @@ func TestDoctorReportIsValidANCCJSON(t *testing.T) {
 	if _, ok := first["status"]; !ok {
 		t.Fatal("checks[0] missing status")
 	}
+}
+
+// WO-10: the Cobra command must accept documented formats, not just the helper path.
+func TestDoctorCommandAcceptsDocumentedFormats(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mail.log")
+	if err := os.WriteFile(p, []byte(bsdLog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mdOut, _, err := runDoctorCommand(t, "--log", p, "--format", "md")
+	if err != nil {
+		t.Fatalf("doctor --format md should succeed: %v", err)
+	}
+	if !strings.Contains(mdOut, "mailreceipt doctor") {
+		t.Fatalf("doctor --format md should emit text output, got %q", mdOut)
+	}
+	defaultOut, _, err := runDoctorCommand(t, "--log", p)
+	if err != nil {
+		t.Fatalf("doctor default format should succeed: %v", err)
+	}
+	if !strings.Contains(defaultOut, "mailreceipt doctor") {
+		t.Fatalf("doctor default format should emit text output, got %q", defaultOut)
+	}
+	jsonOut, _, err := runDoctorCommand(t, "--log", p, "--format", "json")
+	if err != nil {
+		t.Fatalf("doctor --format json should succeed: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &doc); err != nil {
+		t.Fatalf("doctor --format json should emit JSON: %v\n%s", err, jsonOut)
+	}
+}
+
+// WO-10: unknown formats must not silently run as Markdown.
+func TestDoctorCommandRejectsUnknownFormat(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mail.log")
+	if err := os.WriteFile(p, []byte(bsdLog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runDoctorCommand(t, "--log", p, "--format", "typo")
+	if err == nil {
+		t.Fatalf("doctor --format typo should fail, got output:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), `unknown --format "typo"`) ||
+		!strings.Contains(err.Error(), "md or json") {
+		t.Fatalf("unknown format error should name accepted values, got %q", err.Error())
+	}
+	if out != "" {
+		t.Fatalf("unknown format should not emit a fallback report, got:\n%s", out)
+	}
+}
+
+// WO-10: run the public Cobra path so flag handling is covered.
+func runDoctorCommand(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := Root()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs(append([]string{"doctor"}, args...))
+	err := cmd.Execute()
+	return out.String(), errOut.String(), err
 }
 
 func hasPassing(r doctorReport, name string) bool {

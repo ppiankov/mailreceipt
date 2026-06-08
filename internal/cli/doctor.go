@@ -51,14 +51,22 @@ func doctorCmd() *cobra.Command {
 			if logPath == "" {
 				return fmt.Errorf("--log <mail.log> is required")
 			}
+			format = strings.ToLower(strings.TrimSpace(format))
+			switch format {
+			case "", "md", "json":
+			default:
+				// WO-10: reject unknown formats instead of silently emitting Markdown.
+				return fmt.Errorf("unknown --format %q (use md or json)", format)
+			}
 			rep := diagnose(logPath)
-			if format == "json" {
+			switch format {
+			case "json":
 				b, err := json.MarshalIndent(rep, "", "  ")
 				if err != nil {
 					return err
 				}
 				fmt.Fprintln(cmd.OutOrStdout(), string(b))
-			} else {
+			case "", "md":
 				fmt.Fprint(cmd.OutOrStdout(), rep.text())
 			}
 			if rep.Status == "fail" {
