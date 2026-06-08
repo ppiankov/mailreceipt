@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-06-08
+
+### Fixed
+- `filter` replies now render a formal plain-text receipt (labeled `MAIL DELIVERY
+  RECEIPT` sections, word outcomes like `DELIVERED` / `NOT FOUND`), quoted-printable
+  encoded — so conservative desktop mail clients show a readable receipt instead of
+  raw Markdown. The Markdown output of `check` is unchanged.
+- Subjects carrying RFC 2047 encoded-words (e.g. KOI8-R or Windows-1251 Russian
+  subjects) are now decoded to Unicode in the receipt instead of appearing as raw
+  `=?koi8-r?...?=` text. Falls back to the raw header if a charset is unknown.
+- `doctor --format` now rejects unknown values (exit 1) instead of silently emitting
+  text, and accepts the `markdown` alias consistently with `check`. The error and
+  `--help` advertise all accepted values: `md`, `markdown`, `json`.
+
+### Changed
+- Added a dependency on `golang.org/x/text` (the Go team's extended-text package),
+  used only to decode legacy non-UTF-8 mail subject charsets.
+
 ## [0.4.0] - 2026-06-08
 
 ### Added
