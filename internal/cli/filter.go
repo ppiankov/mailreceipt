@@ -68,6 +68,10 @@ func filterCmd() *cobra.Command {
 				return nil
 			}
 
+			// WO-23: envelope sender is the MTA-authenticated trust boundary.
+			if strings.TrimSpace(envelopeFrom) == "" {
+				return nil
+			}
 			triggerSender, ok := normalizeTrustedAddress(envelopeFrom)
 			if !ok {
 				return nil

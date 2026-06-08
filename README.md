@@ -124,6 +124,19 @@ matching.
 It reads the trigger email on stdin and writes a reply email only when the
 authenticated envelope sender is allowed by `.mailreceipt.yml`.
 
+### Security model
+
+Filter authorization is only as strong as the MTA-authenticated envelope sender
+passed to `--envelope-from`. The Postfix alias MUST pass the authenticated SMTP
+envelope sender, not the forgeable message `From:` header. The receipt alias MUST
+NOT be reachable by unauthenticated external inbound mail; expose it only behind
+the internal mail path that supplies the authenticated envelope identity.
+
+If this trust boundary is miswired, an attacker can spoof an allowed sender and
+cause the bot to disclose delivery records in an automatic reply. The filter
+fails closed for empty, malformed, unauthorized, looped, or unreadable requests,
+but it cannot authenticate SMTP by itself.
+
 ```yaml
 receipt_filter:
   domains: [acme.test]

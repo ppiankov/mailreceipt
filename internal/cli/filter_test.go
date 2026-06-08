@@ -211,6 +211,14 @@ func TestFilterUsesWholeDomainWhenNoTeamsConfigured(t *testing.T) {
 	}
 }
 
+// WO-23: missing authenticated envelope senders must fail closed.
+func TestFilterDropsEmptyEnvelopeSender(t *testing.T) {
+	out := runFilter(t, "", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), filterConfig)
+	if out != "" {
+		t.Fatalf("empty envelope sender should be silently dropped, got:\n%s", out)
+	}
+}
+
 // WO-20: malformed authenticated senders must not pass suffix-domain checks.
 func TestFilterDropsMalformedEnvelopeSender(t *testing.T) {
 	cfg := `receipt_filter:

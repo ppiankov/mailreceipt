@@ -78,6 +78,19 @@ mailreceipt filter --envelope-from "$SENDER" --from receipt@acme.test --log /var
 - `--log-year int` — year for year-less BSD syslog timestamps
 - `--case string` — case/matter reference stamped on the receipt
 
+**Security model:**
+
+Filter authorization is only as strong as the MTA-authenticated envelope sender
+passed to `--envelope-from`. The alias MUST pass the authenticated SMTP envelope
+sender, not the forgeable message `From:` header. The alias MUST NOT be reachable
+by unauthenticated external inbound mail; expose it only through the internal MTA
+path that supplies the authenticated envelope identity.
+
+If this trust boundary is miswired, an attacker can spoof an allowed sender and
+cause the bot to disclose delivery records in an automatic reply. `mailreceipt`
+fails closed for empty, malformed, unauthorized, looped, or unreadable requests,
+but it cannot authenticate SMTP by itself.
+
 Configure the internal domains and ownership teams in `.mailreceipt.yml`:
 
 ```yaml
