@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/mail"
 	"os"
 	"strings"
@@ -318,9 +319,12 @@ func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.R
 	if err != nil {
 		return err
 	}
-	markdownBody := rec.Markdown()
+	textBody, err := encodeQuotedPrintable(rec.PlainText())
+	if err != nil {
+		return err
+	}
 	encodedJSONBody := base64.StdEncoding.EncodeToString(jsonBody)
-	boundary, err := filterReplyBoundary(markdownBody, encodedJSONBody)
+	boundary, err := filterReplyBoundary(textBody, encodedJSONBody)
 	if err != nil {
 		return err
 	}
@@ -337,8 +341,8 @@ func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.R
 	fmt.Fprintf(w, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary)
 	fmt.Fprintf(w, "--%s\r\n", boundary)
 	fmt.Fprint(w, "Content-Type: text/plain; charset=utf-8\r\n")
-	fmt.Fprint(w, "Content-Transfer-Encoding: 8bit\r\n\r\n")
-	fmt.Fprint(w, markdownBody)
+	fmt.Fprint(w, "Content-Transfer-Encoding: quoted-printable\r\n\r\n")
+	fmt.Fprint(w, textBody)
 	fmt.Fprintf(w, "\r\n--%s\r\n", boundary)
 	fmt.Fprint(w, "Content-Type: application/json; name=\"mailreceipt.json\"\r\n")
 	fmt.Fprint(w, "Content-Disposition: attachment; filename=\"mailreceipt.json\"\r\n")
@@ -346,6 +350,19 @@ func writeFilterReply(w io.Writer, to, from string, now time.Time, rec receipt.R
 	writeBase64Body(w, jsonBody)
 	fmt.Fprintf(w, "--%s--\r\n", boundary)
 	return nil
+}
+
+// WO-26: encode human replies for conservative mail transports and clients.
+func encodeQuotedPrintable(s string) (string, error) {
+	var b strings.Builder
+	w := quotedprintable.NewWriter(&b)
+	if _, err := w.Write([]byte(s)); err != nil {
+		return "", err
+	}
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+	return b.String(), nil
 }
 
 // WO-22: production boundary source uses crypto randomness per generated reply.

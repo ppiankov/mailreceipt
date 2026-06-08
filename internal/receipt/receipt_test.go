@@ -36,6 +36,62 @@ func TestMarkdownCitesEvidence(t *testing.T) {
 	}
 }
 
+func TestPlainTextIsFormalMailClientReceipt(t *testing.T) {
+	txt := sampleReceipt().PlainText()
+	for _, want := range []string{
+		"MAIL DELIVERY RECEIPT",
+		"MESSAGE",
+		"  Case: CASE-1",
+		"  Subject: Test",
+		"  Message-ID: m1@ex.test",
+		"  Overall: DELIVERED - accepted by the remote mail server",
+		"RECIPIENTS",
+		"  Recipient: a@client.test",
+		"  Outcome: DELIVERED",
+		"  Evidence: 250 2.0.0 OK",
+		"EVIDENCE",
+		"    Jun  5 02:37:14 mail01 postfix/smtp",
+		"LIMITATION",
+		"  transport, not attention",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("plain text receipt missing %q:\n%s", want, txt)
+		}
+	}
+	for _, forbidden := range []string{"# ", "**", "| Recipient |", "```", "✅", "⛔", "⏳", "❓"} {
+		if strings.Contains(txt, forbidden) {
+			t.Fatalf("plain text receipt must not require Markdown/glyph rendering; found %q:\n%s", forbidden, txt)
+		}
+	}
+}
+
+func TestPlainTextNotFoundUsesWordsAndNoTable(t *testing.T) {
+	res := deliver.Result{
+		MessageID: "missing@ex.test",
+		Subject:   "Missing",
+		Caveat:    "transport, not attention",
+		Recipients: []deliver.RecipientResult{{
+			Recipient: "ghost@client.test",
+			Outcome:   deliver.NotFound,
+			Match:     deliver.MatchNone,
+		}},
+	}
+	txt := New(res, "", time.Time{}).PlainText()
+	for _, want := range []string{
+		"  Overall: NOT FOUND - no matching delivery record in the log",
+		"  Outcome: NOT FOUND",
+		"  Evidence: no matching line in log",
+		"  No matching delivery lines were found in the supplied log.",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("plain text not-found receipt missing %q:\n%s", want, txt)
+		}
+	}
+	if strings.Contains(txt, "|") || strings.Contains(txt, "❓") {
+		t.Fatalf("plain text not-found receipt should not look like Markdown table output:\n%s", txt)
+	}
+}
+
 func TestVerifyCitationsPassesWhenPresent(t *testing.T) {
 	r := sampleReceipt()
 	log := "noise\n" + r.Result.Recipients[0].Citation + "\nmore noise\n"

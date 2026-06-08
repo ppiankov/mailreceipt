@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -47,7 +48,8 @@ func TestFilterHappyPathWritesReplyEmail(t *testing.T) {
 	if _, err := mail.ParseDate(msg.Header.Get("Date")); err != nil {
 		t.Fatalf("reply Date should be RFC5322-parseable, got %q: %v", msg.Header.Get("Date"), err)
 	}
-	if !strings.Contains(out, "status=sent") || !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered"`) {
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "status=sent") || !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered"`) {
 		t.Fatalf("happy path should include cited delivered outcome, got:\n%s", out)
 	}
 }
@@ -64,6 +66,38 @@ func TestFilterJSONAttachmentBase64EncodesUTF8(t *testing.T) {
 	}
 	if !strings.Contains(string(decoded), "подтверждено") {
 		t.Fatalf("decoded JSON attachment should preserve UTF-8 evidence, got:\n%s", decoded)
+	}
+}
+
+func TestFilterTextPartIsQuotedPrintablePlainReceipt(t *testing.T) {
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), filterConfig)
+	cte, raw, decoded := filterTextPart(t, out)
+	if cte != "quoted-printable" {
+		t.Fatalf("text part transfer encoding: got %q", cte)
+	}
+	if strings.Contains(string(raw), "подтверждено") {
+		t.Fatalf("text part should not contain raw UTF-8 when quoted-printable encoded, got %q", raw)
+	}
+	for _, want := range []string{
+		"MAIL DELIVERY RECEIPT",
+		"MESSAGE",
+		"  Subject: Filing",
+		"  Overall: DELIVERED - accepted by the remote mail server",
+		"RECIPIENTS",
+		"  Recipient: client@example.test",
+		"  Outcome: DELIVERED",
+		"EVIDENCE",
+		"status=sent (250 2.0.0 OK: queued as SENT1 подтверждено)",
+		"LIMITATION",
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("decoded text receipt missing %q:\n%s", want, decoded)
+		}
+	}
+	for _, forbidden := range []string{"# ", "**", "| Recipient |", "```", "✅", "⛔", "⏳", "❓"} {
+		if strings.Contains(decoded, forbidden) {
+			t.Fatalf("decoded text receipt must not require Markdown/glyph rendering; found %q:\n%s", forbidden, decoded)
+		}
 	}
 }
 
@@ -437,6 +471,54 @@ func filterJSONAttachment(t *testing.T, out string) (string, []byte, []byte) {
 	}
 	t.Fatal("reply should include mailreceipt.json attachment")
 	return "", nil, nil
+}
+
+// WO-26: decode the generated text part exactly as a conservative client would.
+func filterTextPart(t *testing.T, out string) (string, []byte, string) {
+	t.Helper()
+	msg, err := mail.ReadMessage(strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("reply should be a parseable message: %v\n%s", err, out)
+	}
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("reply content type should parse: %v", err)
+	}
+	if mediaType != "multipart/mixed" {
+		t.Fatalf("reply content type: got %q", mediaType)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	for {
+		part, err := mr.NextRawPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read reply part: %v", err)
+		}
+		partMedia, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("text part content type should parse: %v", err)
+		}
+		if partMedia != "text/plain" {
+			continue
+		}
+		raw, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatalf("read text part: %v", err)
+		}
+		cte := strings.ToLower(strings.TrimSpace(part.Header.Get("Content-Transfer-Encoding")))
+		if cte != "quoted-printable" {
+			return cte, raw, string(raw)
+		}
+		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(raw)))
+		if err != nil {
+			t.Fatalf("decode text part: %v", err)
+		}
+		return cte, raw, string(decoded)
+	}
+	t.Fatal("reply should include text/plain part")
+	return "", nil, ""
 }
 
 // WO-19: existing receipt assertions inspect the decoded JSON attachment.

@@ -102,6 +102,61 @@ func (r Receipt) Markdown() string {
 	return b.String()
 }
 
+// PlainText renders the receipt for conservative mail clients. WO-26: filter
+// replies must remain readable when the client shows raw text/plain without
+// Markdown rendering.
+func (r Receipt) PlainText() string {
+	var b strings.Builder
+	b.WriteString("MAIL DELIVERY RECEIPT\n\n")
+	b.WriteString("MESSAGE\n")
+	if r.Case != "" {
+		fmt.Fprintf(&b, "  Case: %s\n", r.Case)
+	}
+	if r.Result.Subject != "" {
+		fmt.Fprintf(&b, "  Subject: %s\n", r.Result.Subject)
+	}
+	if r.Result.MessageID != "" {
+		fmt.Fprintf(&b, "  Message-ID: %s\n", r.Result.MessageID)
+	}
+	fmt.Fprintf(&b, "  Overall: %s\n\n", plainHeadline(r.Summary, r.Result.Counts()))
+
+	b.WriteString("RECIPIENTS\n")
+	for i, rr := range r.Result.Recipients {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		when := "not recorded"
+		if !rr.Time.IsZero() {
+			when = rr.Time.Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(&b, "  Recipient: %s\n", rr.Recipient)
+		fmt.Fprintf(&b, "  Outcome: %s\n", plainOutcome(rr.Outcome))
+		fmt.Fprintf(&b, "  When: %s\n", when)
+		fmt.Fprintf(&b, "  Evidence: %s\n", plainEvidence(rr))
+		if rr.Match != deliver.MatchNone {
+			fmt.Fprintf(&b, "  Match: %s\n", rr.Match)
+		}
+	}
+
+	b.WriteString("\nEVIDENCE\n")
+	any := false
+	for _, rr := range r.Result.Recipients {
+		if rr.Citation == "" {
+			continue
+		}
+		any = true
+		fmt.Fprintf(&b, "  %s (matched by %s):\n", rr.Recipient, rr.Match)
+		fmt.Fprintf(&b, "    %s\n", rr.Citation)
+	}
+	if !any {
+		b.WriteString("  No matching delivery lines were found in the supplied log.\n")
+	}
+
+	b.WriteString("\nLIMITATION\n")
+	fmt.Fprintf(&b, "  %s\n", r.Result.Caveat)
+	return b.String()
+}
+
 // headline gives a short status sentence for the overall summary. For a mixed
 // verdict it states the per-outcome counts so the headline faithfully compresses
 // the rows rather than collapsing to one of them.
@@ -144,6 +199,48 @@ func countsPhrase(counts map[deliver.Outcome]int) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+func plainHeadline(o deliver.Outcome, counts map[deliver.Outcome]int) string {
+	switch o {
+	case deliver.Delivered:
+		return "DELIVERED - accepted by the remote mail server"
+	case deliver.Bounced:
+		return "BOUNCED - hard-rejected, not delivered"
+	case deliver.Deferred:
+		return "DEFERRED - temporary failure, retrying (not yet delivered)"
+	case deliver.NotFound:
+		return "NOT FOUND - no matching delivery record in the log"
+	case deliver.Mixed:
+		return "MIXED - " + countsPhrase(counts)
+	default:
+		return strings.ToUpper(string(o))
+	}
+}
+
+func plainOutcome(o deliver.Outcome) string {
+	switch o {
+	case deliver.Delivered:
+		return "DELIVERED"
+	case deliver.Bounced:
+		return "BOUNCED"
+	case deliver.Deferred:
+		return "DEFERRED"
+	case deliver.NotFound:
+		return "NOT FOUND"
+	default:
+		return strings.ToUpper(string(o))
+	}
+}
+
+func plainEvidence(rr deliver.RecipientResult) string {
+	if rr.Response != "" {
+		return rr.Response
+	}
+	if rr.Outcome == deliver.NotFound {
+		return "no matching line in log"
+	}
+	return "see evidence section"
 }
 
 // countsJSON converts the outcome tally to string-keyed counts for the JSON
