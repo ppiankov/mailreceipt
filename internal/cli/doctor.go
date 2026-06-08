@@ -53,10 +53,11 @@ func doctorCmd() *cobra.Command {
 			}
 			format = strings.ToLower(strings.TrimSpace(format))
 			switch format {
-			case "", "md", "json":
+			case "", "md", "markdown", "json":
 			default:
-				// WO-10: reject unknown formats instead of silently emitting Markdown.
-				return fmt.Errorf("unknown --format %q (use md or json)", format)
+				// WO-10: reject unknown formats instead of silently emitting text.
+				// Accepted set matches check/writeReceipt: md | markdown | json.
+				return fmt.Errorf("unknown --format %q (use md, markdown, or json)", format)
 			}
 			rep := diagnose(logPath)
 			switch format {
@@ -66,7 +67,7 @@ func doctorCmd() *cobra.Command {
 					return err
 				}
 				fmt.Fprintln(cmd.OutOrStdout(), string(b))
-			case "", "md":
+			case "", "md", "markdown":
 				fmt.Fprint(cmd.OutOrStdout(), rep.text())
 			}
 			if rep.Status == "fail" {
@@ -76,7 +77,7 @@ func doctorCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&logPath, "log", "", "path to the Postfix mail log to diagnose (required)")
-	cmd.Flags().StringVar(&format, "format", "md", "output format: md | json")
+	cmd.Flags().StringVar(&format, "format", "md", "output format: md | markdown | json")
 	return cmd
 }
 

@@ -120,6 +120,14 @@ func TestDoctorCommandAcceptsDocumentedFormats(t *testing.T) {
 	if !strings.Contains(mdOut, "mailreceipt doctor") {
 		t.Fatalf("doctor --format md should emit text output, got %q", mdOut)
 	}
+	// WO-10: the `markdown` alias check accepts must match, the same text output.
+	markdownOut, _, err := runDoctorCommand(t, "--log", p, "--format", "markdown")
+	if err != nil {
+		t.Fatalf("doctor --format markdown should succeed (alias of md): %v", err)
+	}
+	if markdownOut != mdOut {
+		t.Fatalf("doctor --format markdown should match --format md output\nmd:       %q\nmarkdown: %q", mdOut, markdownOut)
+	}
 	defaultOut, _, err := runDoctorCommand(t, "--log", p)
 	if err != nil {
 		t.Fatalf("doctor default format should succeed: %v", err)
@@ -147,12 +155,33 @@ func TestDoctorCommandRejectsUnknownFormat(t *testing.T) {
 	if err == nil {
 		t.Fatalf("doctor --format typo should fail, got output:\n%s", out)
 	}
-	if !strings.Contains(err.Error(), `unknown --format "typo"`) ||
-		!strings.Contains(err.Error(), "md or json") {
-		t.Fatalf("unknown format error should name accepted values, got %q", err.Error())
+	// WO-10 rev6: the error must name ALL accepted values, including markdown,
+	// so the alias cannot be silently dropped from the wording again.
+	msg := err.Error()
+	if !strings.Contains(msg, `unknown --format "typo"`) {
+		t.Fatalf("error should name the bad value, got %q", msg)
+	}
+	for _, v := range []string{"md", "markdown", "json"} {
+		if !strings.Contains(msg, v) {
+			t.Fatalf("error should advertise accepted value %q, got %q", v, msg)
+		}
 	}
 	if out != "" {
 		t.Fatalf("unknown format should not emit a fallback report, got:\n%s", out)
+	}
+}
+
+// WO-10 rev6: doctor --help / flag usage must advertise all accepted formats,
+// including the markdown alias, so the documented surface matches what is accepted.
+func TestDoctorHelpAdvertisesAcceptedFormats(t *testing.T) {
+	out, _, err := runDoctorCommand(t, "--help")
+	if err != nil {
+		t.Fatalf("doctor --help should succeed: %v", err)
+	}
+	for _, v := range []string{"md", "markdown", "json"} {
+		if !strings.Contains(out, v) {
+			t.Fatalf("doctor --help should advertise format %q, got:\n%s", v, out)
+		}
 	}
 }
 
