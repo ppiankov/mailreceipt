@@ -53,6 +53,18 @@ type Event struct {
 type Log struct {
 	Events     []Event
 	queueToMsg map[string]string
+	// seenMsgIDs records every message-id observed in ANY log line (postfix delivery
+	// lines AND non-delivery lines such as antivirus/scanner records), lowercased.
+	// WO-33: lets a not_found distinguish "no trace at all" from "seen in the log but
+	// no delivery event recorded".
+	seenMsgIDs map[string]struct{}
+}
+
+// SawMessageID reports whether the message-id appeared anywhere in the log, even on
+// a non-delivery line (e.g. a scanner entry). It does NOT imply delivery.
+func (l Log) SawMessageID(mid string) bool {
+	_, ok := l.seenMsgIDs[strings.ToLower(strings.Trim(strings.TrimSpace(mid), "<>"))]
+	return ok
 }
 
 var (
@@ -63,9 +75,13 @@ var (
 	lineRe = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/(?P<daemon>\w+)\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
 
 	messageIDRe = regexp.MustCompile(`message-id=<?([^>\s,]+)>?`)
-	toRe        = regexp.MustCompile(`\bto=<([^>]*)>`)
-	relayRe     = regexp.MustCompile(`\brelay=([^,]+)`)
-	statusRe    = regexp.MustCompile(`\bstatus=(\w+)\s*(?:\((.*)\))?`)
+	// anyMessageIDRe matches message-id on ANY line, including non-postfix scanner
+	// lines that quote it as message-id="<...>" (WO-33). Case-insensitive, tolerant
+	// of optional quote and angle brackets.
+	anyMessageIDRe = regexp.MustCompile(`(?i)message-id=["']?<?([^>"'\s,]+)>?`)
+	toRe           = regexp.MustCompile(`\bto=<([^>]*)>`)
+	relayRe        = regexp.MustCompile(`\brelay=([^,]+)`)
+	statusRe       = regexp.MustCompile(`\bstatus=(\w+)\s*(?:\((.*)\))?`)
 )
 
 // Traditional BSD syslog timestamps have no year; callers pass the year the log
@@ -101,12 +117,17 @@ func Parse(r io.Reader, year int) Log {
 	if year == 0 {
 		year = 2026
 	}
-	l := Log{queueToMsg: map[string]string{}}
+	l := Log{queueToMsg: map[string]string{}, seenMsgIDs: map[string]struct{}{}}
 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
+		// WO-33: record every message-id seen on ANY line (incl. non-postfix scanner
+		// lines) before filtering to postfix delivery lines.
+		if mid := anyMessageIDRe.FindStringSubmatch(line); mid != nil {
+			l.seenMsgIDs[strings.ToLower(strings.Trim(mid[1], "<>"))] = struct{}{}
+		}
 		m := lineRe.FindStringSubmatch(line)
 		if m == nil {
 			continue

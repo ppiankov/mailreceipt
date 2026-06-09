@@ -39,6 +39,7 @@ func filterCmd() *cobra.Command {
 		caseRef      string
 		envelopeFrom string
 		replyFrom    string
+		dedupDir     string
 	)
 	cmd := &cobra.Command{
 		Use:   "filter",
@@ -60,12 +61,20 @@ func filterCmd() *cobra.Command {
 			if replyFrom == "" && !cmd.Flags().Changed("from") {
 				replyFrom = cfg.ReceiptFilter.ReplyFrom
 			}
+			if dedupDir == "" && !cmd.Flags().Changed("dedup-dir") {
+				dedupDir = cfg.ReceiptFilter.DedupDir
+			}
 
 			raw, err := io.ReadAll(cmd.InOrStdin())
 			if err != nil {
 				return nil
 			}
 			if filterLoopGuard(raw) {
+				return nil
+			}
+			// WO-32: suppress a duplicate receipt when Postfix re-delivers the same
+			// trigger to the pipe. Keyed on the trigger Message-ID; opt-in.
+			if !claimTrigger(dedupDir, raw) {
 				return nil
 			}
 
@@ -127,6 +136,7 @@ func filterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&logPath, "log", "", "path to the Postfix mail log")
 	cmd.Flags().StringVar(&caseRef, "case", "", "case/matter reference to stamp on the receipt")
 	cmd.Flags().IntVar(&logYear, "log-year", 0, "year for the year-less syslog timestamps (default 2026)")
+	cmd.Flags().StringVar(&dedupDir, "dedup-dir", "", "directory for trigger idempotency state (suppresses duplicate receipts on pipe re-delivery)")
 	return cmd
 }
 

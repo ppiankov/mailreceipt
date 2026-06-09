@@ -90,6 +90,10 @@ type RecipientResult struct {
 	// Citation is the verbatim log line this outcome was decided from, or empty
 	// for NotFound.
 	Citation string `json:"citation,omitempty"`
+	// Note carries non-delivery provenance for a NotFound result. WO-33: when the
+	// message-id was seen elsewhere in the log (e.g. a scanner/cleanup line) but no
+	// delivery event was recorded, this says so — without implying delivery.
+	Note string `json:"note,omitempty"`
 }
 
 // Result is the full delivery analysis for a dropped email.
@@ -113,10 +117,16 @@ const localCaveat = "A 'delivered local' outcome means this mail server handed t
 
 const mixedCaveat = "This receipt covers two handoff types. A 'delivered' (remote) outcome means a remote mail server accepted the message at relay handoff; a 'delivered local' outcome means this mail server handed the message to a local transport, with no remote relay acceptance observed. Neither proves a person read it, that it passed spam filtering, or that it was not later discarded. This receipt reports transport, not attention."
 
-// caveatFor picks the honest caveat for the set of recipient results. local-only =>
-// localCaveat; any mix of remote and local delivery => mixedCaveat (so a local
-// recipient is never described as remote acceptance, and vice versa); otherwise the
-// remote caveat.
+// noDeliveryCaveat is used when no recipient was delivered (all not_found, bounced,
+// or deferred). WO-32: such a receipt must NOT lead with "a delivered outcome means
+// the remote mail server accepted (SMTP 2xx)" — there is no delivery to qualify, so
+// it makes no remote/SMTP claim at all.
+const noDeliveryCaveat = "This receipt found no delivery record for the message. It reports only what the supplied log shows; absence of a delivery line is not proof the message was or was not delivered elsewhere. This receipt reports transport, not attention."
+
+// caveatFor picks the honest caveat for the set of recipient results. No delivery
+// at all => noDeliveryCaveat (no remote/SMTP claim); local-only => localCaveat; any
+// mix of remote and local delivery => mixedCaveat (so a local recipient is never
+// described as remote acceptance, and vice versa); else the remote caveat.
 func caveatFor(recipients []RecipientResult) string {
 	anyRemote, anyLocal := false, false
 	for _, rr := range recipients {
@@ -128,6 +138,8 @@ func caveatFor(recipients []RecipientResult) string {
 		}
 	}
 	switch {
+	case !anyRemote && !anyLocal:
+		return noDeliveryCaveat
 	case anyLocal && !anyRemote:
 		return localCaveat
 	case anyLocal && anyRemote:
@@ -178,11 +190,7 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log) RecipientResult
 	if len(events) == 0 {
 		if e.Date.IsZero() {
 			// WO-8: no send time means recipient fallback would be unbounded.
-			return RecipientResult{
-				Recipient: rcpt,
-				Outcome:   NotFound,
-				Match:     MatchNone,
-			}
+			return notFoundResult(rcpt, e.MessageID, log)
 		}
 		from := e.Date.Add(-Window)
 		until := e.Date.Add(Window)
@@ -193,11 +201,7 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log) RecipientResult
 	}
 
 	if len(events) == 0 {
-		return RecipientResult{
-			Recipient: rcpt,
-			Outcome:   NotFound,
-			Match:     MatchNone,
-		}
+		return notFoundResult(rcpt, e.MessageID, log)
 	}
 
 	// Pick the most decisive, most recent event for this recipient. Precedence:
@@ -213,6 +217,17 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log) RecipientResult
 		Time:      chosen.Time,
 		Citation:  chosen.RawLine,
 	}
+}
+
+// notFoundResult builds a NotFound for a recipient. WO-33: if the message-id was
+// seen anywhere in the log (e.g. a scanner/cleanup line) but no delivery event was
+// recorded, it adds a note saying so — without implying delivery.
+func notFoundResult(rcpt, messageID string, log maillog.Log) RecipientResult {
+	rr := RecipientResult{Recipient: rcpt, Outcome: NotFound, Match: MatchNone}
+	if messageID != "" && log.SawMessageID(messageID) {
+		rr.Note = "message seen in the log, but no delivery event was recorded for this recipient"
+	}
+	return rr
 }
 
 // chooseEvent selects the authoritative event: latest by time; if times tie or

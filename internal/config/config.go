@@ -32,6 +32,8 @@ type ReceiptFilterConfig struct {
 	Teams   map[string][]string // WO-13: named ownership groups for trigger sender and sent-message owner
 	// WO-16: reply From address for generated filter responses.
 	ReplyFrom string
+	// WO-32: directory for trigger idempotency state; empty disables dedup.
+	DedupDir string
 }
 
 // Load reads cfgPath. A missing file is not an error: it returns an empty Config
@@ -75,6 +77,8 @@ func Load(cfgPath string) (Config, bool, error) {
 				c.ReceiptFilter.Domains = parseList(val)
 			case indent == 2 && key == "reply_from":
 				c.ReceiptFilter.ReplyFrom = val
+			case indent == 2 && key == "dedup_dir":
+				c.ReceiptFilter.DedupDir = unquote(val)
 			case indent == 2 && key == "teams":
 				inTeams = true
 				ensureTeams(&c)

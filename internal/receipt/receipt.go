@@ -72,14 +72,7 @@ func (r Receipt) Markdown() string {
 		if !rr.Time.IsZero() {
 			when = rr.Time.Format("2006-01-02 15:04")
 		}
-		ev := rr.Response
-		if ev == "" {
-			if rr.Outcome == deliver.NotFound {
-				ev = "no matching line in log"
-			} else {
-				ev = "(see citation)"
-			}
-		}
+		ev := plainEvidence(rr)
 		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n",
 			rr.Recipient, badge(rr.Outcome), when, mdEscape(ev))
 	}
@@ -257,6 +250,10 @@ func plainEvidence(rr deliver.RecipientResult) string {
 		return rr.Response
 	}
 	if rr.Outcome == deliver.NotFound {
+		// WO-33: distinguish "seen in the log but not delivered" from "no trace".
+		if rr.Note != "" {
+			return rr.Note
+		}
 		return "no matching line in log"
 	}
 	return "see evidence section"

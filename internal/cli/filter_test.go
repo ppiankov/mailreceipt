@@ -596,3 +596,63 @@ Message-ID: <` + messageID + `>
 body
 `
 }
+
+// WO-32: a trigger carrying its own Message-ID, so dedup can key on it.
+func triggerWithMessageID(mid, attached string) string {
+	return `From: Docketing <docketing@acme.test>
+To: receipt@acme.test
+Subject: receipt request
+Message-ID: <` + mid + `>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b"
+
+--b
+Content-Type: text/plain
+
+Please receipt this sent mail.
+--b
+Content-Type: message/rfc822
+Content-Disposition: attachment; filename="sent.eml"
+
+` + attached + `
+--b--
+`
+}
+
+func TestFilterDedupSuppressesDuplicateTrigger(t *testing.T) {
+	dedup := t.TempDir()
+	trigger := triggerWithMessageID("trigger-dup-1@acme.test", sentMail("sent-1@acme.test", "client@example.test"))
+
+	first := runFilterWithArgs(t, "docketing@acme.test", trigger, filterConfig, "--dedup-dir", dedup)
+	if !strings.Contains(first, "MAIL DELIVERY RECEIPT") {
+		t.Fatalf("first trigger should emit a receipt, got:\n%s", first)
+	}
+	second := runFilterWithArgs(t, "docketing@acme.test", trigger, filterConfig, "--dedup-dir", dedup)
+	if strings.TrimSpace(second) != "" {
+		t.Fatalf("re-delivered identical trigger must emit NO receipt, got:\n%s", second)
+	}
+}
+
+func TestFilterDedupDistinctTriggersBothEmit(t *testing.T) {
+	dedup := t.TempDir()
+	t1 := triggerWithMessageID("trigger-a@acme.test", sentMail("sent-1@acme.test", "client@example.test"))
+	t2 := triggerWithMessageID("trigger-b@acme.test", sentMail("sent-1@acme.test", "client@example.test"))
+
+	if out := runFilterWithArgs(t, "docketing@acme.test", t1, filterConfig, "--dedup-dir", dedup); !strings.Contains(out, "MAIL DELIVERY RECEIPT") {
+		t.Fatalf("trigger A should emit")
+	}
+	if out := runFilterWithArgs(t, "docketing@acme.test", t2, filterConfig, "--dedup-dir", dedup); !strings.Contains(out, "MAIL DELIVERY RECEIPT") {
+		t.Fatalf("distinct trigger B must still emit (different Message-ID)")
+	}
+}
+
+func TestFilterDedupOffByDefaultEmitsEachTime(t *testing.T) {
+	trigger := triggerWithMessageID("trigger-nodd@acme.test", sentMail("sent-1@acme.test", "client@example.test"))
+	// No --dedup-dir: behavior unchanged, both invocations emit.
+	if out := runFilter(t, "docketing@acme.test", trigger, filterConfig); !strings.Contains(out, "MAIL DELIVERY RECEIPT") {
+		t.Fatalf("first emit")
+	}
+	if out := runFilter(t, "docketing@acme.test", trigger, filterConfig); !strings.Contains(out, "MAIL DELIVERY RECEIPT") {
+		t.Fatalf("without dedup, second invocation must still emit")
+	}
+}

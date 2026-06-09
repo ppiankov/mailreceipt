@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `filter --dedup-dir` (and `receipt_filter.dedup_dir` config) — an opt-in
+  idempotency store keyed on the trigger's `Message-ID`. When a Postfix pipe
+  re-delivers the same trigger (a slow-but-succeeding pipe gets re-queued), the
+  filter suppresses the duplicate receipt instead of emailing it twice. Off by
+  default; recommended for any pipe deployment.
+
+- A `not_found` recipient whose `Message-ID` appears elsewhere in the log (e.g. an
+  antivirus/scanner line) but has no delivery event is now annotated "message seen
+  in the log, but no delivery event was recorded" — distinguishing it from a message
+  with no trace at all. The outcome stays `not_found`; no delivery is implied. The
+  JSON gains an optional per-recipient `note` field.
+
+### Fixed
+- A receipt that found no delivery (all `not_found`) no longer renders the remote
+  delivery caveat ("a 'delivered' outcome means the remote mail server accepted the
+  message (SMTP 2xx)…") — there is no delivery to qualify, so it now makes no
+  remote/SMTP claim and states plainly that no delivery record was found.
+
 ## [0.5.0] - 2026-06-09
 
 ### Changed (breaking — JSON schema)

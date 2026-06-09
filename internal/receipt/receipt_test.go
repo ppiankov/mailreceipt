@@ -229,3 +229,22 @@ func TestLocalReceiptNeverClaimsRemote(t *testing.T) {
 		t.Fatalf("local plain-text receipt should name the local delivery, got:\n%s", pt)
 	}
 }
+
+// WO-32: an all-not_found receipt must not lead its limitation with a remote
+// delivery claim; there is no delivery to qualify.
+func TestNotFoundReceiptCaveatMakesNoRemoteClaim(t *testing.T) {
+	res := deliver.Analyze(
+		eml.Email{MessageID: "nf@acme.test", To: []string{"ghost@acme.test"}},
+		maillog.Parse(strings.NewReader(
+			"Jun  5 10:00:00 mail postfix/smtp[1]: AAAAAA: to=<other@x.test>, relay=mx[1.2.3.4]:25, status=sent (250 OK)\n",
+		), 2026),
+	)
+	r := New(res, "", time.Time{})
+	for _, body := range []string{r.Markdown(), r.PlainText()} {
+		for _, bad := range []string{"remote mail server", "SMTP 2xx", "a 'delivered' outcome means"} {
+			if strings.Contains(strings.ToLower(body), strings.ToLower(bad)) {
+				t.Fatalf("not_found receipt must not claim %q:\n%s", bad, body)
+			}
+		}
+	}
+}

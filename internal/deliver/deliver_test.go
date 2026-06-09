@@ -304,3 +304,29 @@ func TestRemoteSmtpHandoffIsDeliveredRemote(t *testing.T) {
 		t.Fatalf("remote receipt should keep the remote-server caveat, got: %s", res.Caveat)
 	}
 }
+
+// WO-33: a not_found whose message-id appears only in a non-delivery line (e.g. an
+// antivirus scanner record) is annotated as "seen but not delivered", not bare.
+func TestNotFoundSeenInScannerLineGetsNote(t *testing.T) {
+	log := parseLog(t, `2026-06-09T09:28:51+02:00 mail KLMS: not processed: message-id="<seen-1@acme.test>": action="Skipped": rcpt-to="auser@acme.test"
+2026-06-09T09:30:00+02:00 mail postfix/smtp[1]: AAAAAA: to=<other@x.test>, relay=mx[1.2.3.4]:25, status=sent (250 OK)
+`)
+	res := Analyze(eml.Email{MessageID: "seen-1@acme.test", To: []string{"auser@acme.test"}}, log)
+	rr := find(res, "auser@acme.test")
+	if rr.Outcome != NotFound {
+		t.Fatalf("scanner-only message must stay not_found, got %s", rr.Outcome)
+	}
+	if rr.Note == "" {
+		t.Fatal("a message seen in a non-delivery line should carry a 'seen but not delivered' note")
+	}
+}
+
+func TestNotFoundNoTraceHasNoNote(t *testing.T) {
+	log := parseLog(t, `2026-06-09T09:30:00+02:00 mail postfix/smtp[1]: AAAAAA: to=<other@x.test>, relay=mx[1.2.3.4]:25, status=sent (250 OK)
+`)
+	res := Analyze(eml.Email{MessageID: "absent@acme.test", To: []string{"nobody@acme.test"}}, log)
+	rr := find(res, "nobody@acme.test")
+	if rr.Outcome != NotFound || rr.Note != "" {
+		t.Fatalf("a message with no trace must be bare not_found, got outcome=%s note=%q", rr.Outcome, rr.Note)
+	}
+}

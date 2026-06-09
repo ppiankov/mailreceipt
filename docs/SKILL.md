@@ -91,6 +91,21 @@ mailreceipt filter --envelope-from "$SENDER" --from receipt@acme.test --log /var
 - `--log path` — path to the Postfix mail log, or set `log` in `.mailreceipt.yml`
 - `--log-year int` — year for year-less BSD syslog timestamps
 - `--case string` — case/matter reference stamped on the receipt
+- `--dedup-dir path` — idempotency state directory (recommended; see below), or set `dedup_dir` in `.mailreceipt.yml`
+
+**Idempotency (recommended for any pipe deployment):**
+
+A Postfix pipe can RE-DELIVER the same trigger to the filter (a slow-but-succeeding
+pipe gets re-queued), which without protection produces duplicate receipt emails.
+Set `--dedup-dir` (or `receipt_filter.dedup_dir`) to a writable directory; the
+filter records each trigger's `Message-ID` and silently suppresses a re-delivery of
+the same trigger. Prune the directory periodically, e.g.
+`find /var/lib/mailreceipt/dedup -mindepth 1 -mmin +1440 -delete` via cron.
+
+Also harden the Postfix transport so it does not re-queue a succeeding pipe — in
+`master.cf`, give the `mailreceipt` transport `flags=Xhq` (the `X` makes the pipe's
+exit status final) and a sane `command_time_limit`. The dedup store is the
+defense-in-depth backstop; `flags=X` is the root config fix.
 
 **Security model:**
 
@@ -111,6 +126,7 @@ Configure the internal domains and ownership teams in `.mailreceipt.yml`:
 receipt_filter:
   domains: [acme.test]
   reply_from: receipt@acme.test
+  dedup_dir: /var/lib/mailreceipt/dedup
   teams:
     docketing:
       members: [docketing@acme.test, assistant1@acme.test, attorney1@acme.test]
