@@ -5,21 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - 2026-06-09
 
-### Added
-- Per-recipient outcomes now distinguish `delivered_remote` (a remote SMTP/LMTP
-  relay accepted the message at handoff to a remote host) from `delivered_local`
-  (a local Postfix transport/pipe/mailbox accepted it). The distinction is exposed
-  in JSON so a downstream consumer cannot mistake a local hand-off for remote
-  acceptance.
+### Changed (breaking — JSON schema)
+- The per-recipient `outcome` value `delivered` is **replaced** by `delivered_remote`
+  (a remote SMTP/LMTP relay accepted the message at handoff to a remote host) and
+  `delivered_local` (a local Postfix transport/pipe/mailbox accepted it). Consumers
+  filtering on `outcome == "delivered"` must now match `delivered_remote` /
+  `delivered_local` (e.g. `select(.outcome == "delivered_remote" or .outcome ==
+  "delivered_local")`). The whole-email `summary` may be `delivered_remote`,
+  `delivered_local`, `delivered` (all delivered across a mix of transports —
+  summary-only), `bounced`, `deferred`, `not_found`, or `mixed`; `summary_counts`
+  keys follow the per-recipient values.
 
 ### Fixed
 - A message handed to a local transport (e.g. `relay=mailreceipt`, `postfix/pipe`)
   is no longer reported as "accepted by the remote mail server (SMTP 2xx)". A local
   delivery now renders "Delivered locally — accepted by a local mail transport" with
-  a caveat that explicitly makes no remote-server or SMTP 2xx claim. The receipt
-  names the handoff it actually observed.
+  a caveat that explicitly makes no remote-server or SMTP 2xx claim, and a mixed
+  remote+local receipt uses a caveat covering both. The receipt names the handoff it
+  actually observed.
 
 ## [0.4.1] - 2026-06-08
 
