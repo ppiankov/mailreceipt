@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Alias deliveries now correlate to the right recipient. When `/etc/aliases`
+  redirects an address to another mailbox (e.g. `j.smith: docketing`),
+  Postfix delivers to the target mailbox but logs `orig_to=<original-address>`
+  alongside `to=<alias-target>`. mailreceipt now reads `orig_to` and matches a
+  recipient against it, so an aliased delivery resolves to `delivered_local` for the
+  address the message was actually sent to — using the bridge Postfix logs, with no
+  `/etc/aliases` parsing. Covers `postfix/local` → maildrop mailbox deliveries.
+
 ### Added
 - Dovecot LDA/LMTP local-delivery lines are now recognized. On the common
   Postfix + Dovecot setup, Postfix hands internal mail to `dovecot-lda`, which logs

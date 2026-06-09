@@ -334,10 +334,10 @@ func TestNotFoundNoTraceHasNoNote(t *testing.T) {
 // WO-34: an internal message delivered by Dovecot (Postfix mailbox_command=dovecot-lda)
 // resolves to delivered_local, not not_found.
 func TestDovecotInternalDeliveryIsDeliveredLocal(t *testing.T) {
-	log := parseLog(t, `2026-06-09T09:28:51+02:00 mail KLMS: not processed: message-id="<dv-1@acme.test>": rcpt-to="a.user@acme.test"
-2026-06-09T09:28:52+02:00 mail dovecot: lda(a.user)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: msgid=<dv-1@acme.test>: saved mail to INBOX
+	log := parseLog(t, `2026-06-09T09:28:51+02:00 mail KLMS: not processed: message-id="<dv1@acme.test>": rcpt-to="a.user@acme.test"
+2026-06-09T09:28:52+02:00 mail dovecot: lda(a.user)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: msgid=<dv1@acme.test>: saved mail to INBOX
 `)
-	res := Analyze(eml.Email{MessageID: "dv-1@acme.test", To: []string{"a.user@acme.test"}}, log)
+	res := Analyze(eml.Email{MessageID: "dv1@acme.test", To: []string{"a.user@acme.test"}}, log)
 	rr := find(res, "a.user@acme.test")
 	if rr.Outcome != DeliveredLocal {
 		t.Fatalf("dovecot internal delivery must be delivered_local, got %s", rr.Outcome)
@@ -353,8 +353,8 @@ func TestDovecotInternalDeliveryIsDeliveredLocal(t *testing.T) {
 func TestDovecotAliasRemappedSoleRecipientMatchesByMessageID(t *testing.T) {
 	log := parseLog(t, `2026-06-09T15:38:54+02:00 mail dovecot: lda(clerk)<4050777><sess>: msgid=<alias1@p.com>: saved mail to INBOX
 `)
-	res := Analyze(eml.Email{MessageID: "alias1@p.com", To: []string{"p.jones@acme.test"}}, log)
-	rr := find(res, "p.jones@acme.test")
+	res := Analyze(eml.Email{MessageID: "alias1@p.com", To: []string{"r.jones@acme.test"}}, log)
+	rr := find(res, "r.jones@acme.test")
 	if rr.Outcome != DeliveredLocal || rr.Match != MatchMessageID {
 		t.Fatalf("aliased sole-recipient dovecot save should be delivered_local by message_id, got outcome=%s match=%s", rr.Outcome, rr.Match)
 	}
@@ -370,5 +370,26 @@ func TestDovecotAliasRemappedMultiRecipientDoesNotMisattribute(t *testing.T) {
 		if r.Outcome != NotFound {
 			t.Fatalf("ambiguous aliased save must not be attributed; %s got %s", r.Recipient, r.Outcome)
 		}
+	}
+}
+
+// WO-35: a /etc/aliases redirect (j.smith -> docketing mailbox) delivered
+// by postfix/local to maildrop. Postfix logs orig_to=<address> alongside
+// to=<alias-target>, so the delivery correlates to the real recipient via orig_to —
+// no /etc/aliases parsing. Fixture is jsmith's verbatim production line.
+func TestAliasDeliveryCorrelatesViaOrigTo(t *testing.T) {
+	log := parseLog(t, `2026-06-08T19:35:27+02:00 mail postfix/cleanup[3957651]: ABCD1234EF01: message-id=<aaaa1111@acme.test>
+2026-06-08T19:35:28+02:00 mail postfix/local[3957653]: ABCD1234EF01: to=<docketing@mail.acme.test>, orig_to=<j.smith@acme.test>, relay=local, delay=3.3, delays=3.3/0/0/0.01, dsn=2.0.0, status=sent (delivered to command: /usr/bin/maildrop -d ${USER})
+`)
+	res := Analyze(eml.Email{MessageID: "aaaa1111@acme.test", To: []string{"j.smith@acme.test"}}, log)
+	rr := find(res, "j.smith@acme.test")
+	if rr.Outcome != DeliveredLocal {
+		t.Fatalf("alias delivery via orig_to must be delivered_local, got %s", rr.Outcome)
+	}
+	if rr.Match != MatchMessageID {
+		t.Fatalf("should correlate by message_id, got %s", rr.Match)
+	}
+	if strings.Contains(res.Caveat, "accepted the message (SMTP 2xx)") {
+		t.Fatalf("local maildrop delivery must not affirm SMTP 2xx: %s", res.Caveat)
 	}
 }

@@ -35,16 +35,21 @@ const (
 // Event is one recipient-level delivery record, linked to its message-id via the
 // queue id. RawLine is the verbatim syslog line for citation.
 type Event struct {
-	QueueID   string    `json:"queue_id"`
-	MessageID string    `json:"message_id,omitempty"`
-	To        string    `json:"to"`
-	Relay     string    `json:"relay,omitempty"`
-	Daemon    string    `json:"daemon,omitempty"` // postfix delivery agent: smtp, lmtp, pipe, local, virtual
-	Status    Status    `json:"status"`
-	Response  string    `json:"response,omitempty"` // the remote server's text, e.g. "250 2.0.0 OK"
-	Time      time.Time `json:"time,omitempty"`
-	TimeRaw   string    `json:"time_raw,omitempty"`
-	RawLine   string    `json:"raw_line"`
+	QueueID   string `json:"queue_id"`
+	MessageID string `json:"message_id,omitempty"`
+	To        string `json:"to"`
+	// OrigTo is the original recipient before alias expansion, when Postfix logs it
+	// (postfix/local writes "to=<mailbox>, orig_to=<address>"). WO-35: this is the
+	// in-log alias bridge — it lets a delivery to an alias-target mailbox correlate
+	// to the address the message was actually sent to, with no /etc/aliases parsing.
+	OrigTo   string    `json:"orig_to,omitempty"`
+	Relay    string    `json:"relay,omitempty"`
+	Daemon   string    `json:"daemon,omitempty"` // postfix delivery agent: smtp, lmtp, pipe, local, virtual
+	Status   Status    `json:"status"`
+	Response string    `json:"response,omitempty"` // the remote server's text, e.g. "250 2.0.0 OK"
+	Time     time.Time `json:"time,omitempty"`
+	TimeRaw  string    `json:"time_raw,omitempty"`
+	RawLine  string    `json:"raw_line"`
 }
 
 // Log is the parsed result: delivery events plus a queue-id → message-id map
@@ -80,6 +85,7 @@ var (
 	// of optional quote and angle brackets.
 	anyMessageIDRe = regexp.MustCompile(`(?i)message-id=["']?<?([^>"'\s,]+)>?`)
 	toRe           = regexp.MustCompile(`\bto=<([^>]*)>`)
+	origToRe       = regexp.MustCompile(`\borig_to=<([^>]*)>`)
 
 	// WO-34: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda, or
 	// LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines are a
@@ -224,6 +230,9 @@ func Parse(r io.Reader, year int) Log {
 		}
 		if to := toRe.FindStringSubmatch(rest); to != nil {
 			ev.To = strings.ToLower(strings.TrimSpace(to[1]))
+		}
+		if ot := origToRe.FindStringSubmatch(rest); ot != nil {
+			ev.OrigTo = strings.ToLower(strings.TrimSpace(ot[1]))
 		}
 		if rl := relayRe.FindStringSubmatch(rest); rl != nil {
 			ev.Relay = strings.TrimSpace(rl[1])

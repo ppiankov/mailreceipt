@@ -197,6 +197,15 @@ func recipientMatches(evTo, want string) bool {
 	return false
 }
 
+// eventMatchesRecipient reports whether a delivery event belongs to the wanted
+// recipient, by either the delivered-to address/mailbox (To) or the pre-alias
+// original recipient (OrigTo). WO-35: postfix/local logs "to=<alias-target>,
+// orig_to=<address>", so an alias delivery (jsmith -> docketing mailbox) correlates
+// to the address it was sent to via orig_to — the alias bridge Postfix itself logs.
+func eventMatchesRecipient(ev maillog.Event, rcpt string) bool {
+	return recipientMatches(ev.To, rcpt) || recipientMatches(ev.OrigTo, rcpt)
+}
+
 func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) RecipientResult {
 	// 1) Strongest link: Message-ID, then filter to this recipient.
 	var events []maillog.Event
@@ -209,7 +218,7 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) Reci
 			// same across every alias hop, so when this is the message's only
 			// recipient, a Message-ID-matched Dovecot save is unambiguously theirs
 			// even when the mailbox name does not match the address.
-			if recipientMatches(ev.To, rcpt) || (sole && ev.Daemon == "dovecot") {
+			if eventMatchesRecipient(ev, rcpt) || (sole && ev.Daemon == "dovecot") {
 				events = append(events, ev)
 			}
 		}
