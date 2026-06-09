@@ -1,0 +1,128 @@
+#!/bin/sh
+set -u
+umask 077
+
+TAG="mailreceipt-postfix"
+MAILRECEIPT_BIN="${MAILRECEIPT_BIN:-/usr/local/bin/mailreceipt}"
+SENDMAIL_BIN="${SENDMAIL_BIN:-/usr/sbin/sendmail}"
+MAILRECEIPT_CONFIG_DIR="${MAILRECEIPT_CONFIG_DIR:-/etc/mailreceipt}"
+MAILRECEIPT_LOG="${MAILRECEIPT_LOG:-/var/log/mail.log}"
+MAILRECEIPT_DEBUG_DIR="${MAILRECEIPT_DEBUG_DIR:-/var/tmp/mailreceipt-debug}"
+TMPDIR="${TMPDIR:-/tmp}"
+DEBUG="${MAILRECEIPT_POSTFIX_DEBUG:-0}"
+SENDER=""
+
+log_msg() {
+  logger -t "$TAG" "$*"
+}
+
+debug_enabled() {
+  case "$DEBUG" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --debug)
+      DEBUG=1
+      ;;
+    --)
+      shift
+      if [ "$#" -gt 0 ] && [ -z "$SENDER" ]; then
+        SENDER="$1"
+      fi
+      break
+      ;;
+    -*)
+      log_msg "unknown option $1"
+      exit 0
+      ;;
+    *)
+      if [ -z "$SENDER" ]; then
+        SENDER="$1"
+      fi
+      ;;
+  esac
+  shift
+done
+
+OUT="$(mktemp "$TMPDIR/mailreceipt-postfix.XXXXXX")" || {
+  log_msg "mktemp output failed"
+  exit 0
+}
+ERR=""
+IN=""
+
+cleanup() {
+  rm -f "$OUT"
+  if ! debug_enabled; then
+    [ -z "$ERR" ] || rm -f "$ERR"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+cd "$MAILRECEIPT_CONFIG_DIR" || {
+  log_msg "config directory unavailable"
+  exit 0
+}
+
+if debug_enabled; then
+  mkdir -p "$MAILRECEIPT_DEBUG_DIR" || {
+    log_msg "debug directory unavailable"
+    exit 0
+  }
+  IN="$(mktemp "$MAILRECEIPT_DEBUG_DIR/in.XXXXXX")" || {
+    log_msg "mktemp debug input failed"
+    exit 0
+  }
+  ERR="$(mktemp "$MAILRECEIPT_DEBUG_DIR/err.XXXXXX")" || {
+    log_msg "mktemp debug stderr failed"
+    exit 0
+  }
+  cat > "$IN" || {
+    log_msg "debug input capture failed"
+    exit 0
+  }
+  log_msg "debug enabled sender=$SENDER input=$IN err=$ERR"
+  if "$MAILRECEIPT_BIN" filter \
+    --envelope-from "$SENDER" \
+    --log "$MAILRECEIPT_LOG" \
+    < "$IN" \
+    > "$OUT" \
+    2> "$ERR"
+  then
+    log_msg "filter ok sender=$SENDER"
+  else
+    log_msg "filter failed sender=$SENDER err=$ERR"
+    exit 0
+  fi
+else
+  ERR="$(mktemp "$TMPDIR/mailreceipt-postfix.XXXXXX.err")" || {
+    log_msg "mktemp stderr failed"
+    exit 0
+  }
+  # WO-31: production mode streams stdin directly; retained copies require debug opt-in.
+  if "$MAILRECEIPT_BIN" filter \
+    --envelope-from "$SENDER" \
+    --log "$MAILRECEIPT_LOG" \
+    > "$OUT" \
+    2> "$ERR"
+  then
+    :
+  else
+    log_msg "filter failed sender=$SENDER"
+    exit 0
+  fi
+fi
+
+if [ -s "$OUT" ]; then
+  if "$SENDMAIL_BIN" -oi -t < "$OUT"; then
+    debug_enabled && log_msg "reply sent sender=$SENDER"
+  else
+    log_msg "sendmail failed sender=$SENDER"
+  fi
+fi
+
+exit 0

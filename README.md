@@ -19,16 +19,16 @@ mailreceipt check reminder.eml --log /var/log/mail.log --case CASE-001
 **Case:** CASE-001
 **Overall:** Mixed — 1 delivered (remote), 1 delivered (local), 1 bounced
 
-| Recipient                | Outcome              | When             | Evidence |
-|--------------------------|----------------------|------------------|----------|
-| jdoe@exampleclient.test  | ✅ delivered         | 2026-06-05 15:41 | 250 2.0.0 OK |
-| filing@exampleclient.test| 📥 delivered (local) | 2026-06-05 15:41 | delivered via mailreceipt service |
-| team@exampleclient.test  | ⛔ bounced           | 2026-06-05 15:09 | 550 5.1.1 User unknown |
+| Recipient                     | Outcome              | When             | Evidence |
+|-------------------------------|----------------------|------------------|----------|
+| recipient-remote@example.net  | ✅ delivered         | 2026-06-05 15:41 | 250 2.0.0 OK |
+| recipient-local@example.com   | 📥 delivered (local) | 2026-06-05 15:41 | delivered via mailreceipt service |
+| recipient-bounced@example.net | ⛔ bounced           | 2026-06-05 15:09 | 550 5.1.1 User unknown |
 
 ## Evidence (verbatim log lines)
-- jdoe@…:    Jun 5 15:41:55 … postfix/smtp … relay=mx.client[203.0.113.25]:25 … status=sent (250 2.0.0 OK)
-- filing@…:  Jun 5 15:41:55 … postfix/pipe … relay=mailreceipt … status=sent (delivered via mailreceipt service)
-- team@…:    Jun 5 15:09:21 … status=bounced (… 550 5.1.1 … User unknown …)
+- recipient-remote@…:  Jun 5 15:41:55 … postfix/smtp … relay=mx.example[203.0.113.25]:25 … status=sent (250 2.0.0 OK)
+- recipient-local@…:   Jun 5 15:41:55 … postfix/pipe … relay=mailreceipt … status=sent (delivered via mailreceipt service)
+- recipient-bounced@…: Jun 5 15:09:21 … status=bounced (… 550 5.1.1 … User unknown …)
 
 > This receipt covers two handoff types. A 'delivered' (remote) outcome means a
 > remote mail server accepted the message at relay handoff; a 'delivered local'
@@ -124,9 +124,12 @@ matching.
 
 ## Receipt-by-email filter
 
-`mailreceipt filter` is for an internal alias such as `receipt@yourdomain.test`.
+`mailreceipt filter` is for an internal alias such as `receipt@example.com`.
 It reads the trigger email on stdin and writes a reply email only when the
 authenticated envelope sender is allowed by `.mailreceipt.yml`.
+
+For a complete Postfix pipe-transport setup, including the production wrapper
+with debug capture off by default, see [docs/postfix.md](docs/postfix.md).
 
 ### Security model
 
@@ -143,18 +146,18 @@ but it cannot authenticate SMTP by itself.
 
 ```yaml
 receipt_filter:
-  domains: [acme.test]
-  reply_from: receipt@acme.test
+  domains: [example.com]
+  reply_from: receipt@example.com
   teams:
-    docketing:
-      members: [docketing@acme.test, assistant1@acme.test, attorney1@acme.test]
+    support:
+      members: [sender@example.com, member@example.com]
 ```
 
 Wire the alias so the MTA passes its authenticated envelope sender, not the
 forgeable `From:` header:
 
 ```sh
-mailreceipt filter --envelope-from "$SENDER" --from receipt@acme.test --log /var/log/mail.log
+mailreceipt filter --envelope-from "$SENDER" --from receipt@example.com --log /var/log/mail.log
 ```
 
 Forward the original sent message as an `.eml` / `message/rfc822` attachment.
