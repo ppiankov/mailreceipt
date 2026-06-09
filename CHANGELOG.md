@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Per-recipient outcomes now distinguish `delivered_remote` (a remote SMTP/LMTP
+  relay accepted the message at handoff to a remote host) from `delivered_local`
+  (a local Postfix transport/pipe/mailbox accepted it). The distinction is exposed
+  in JSON so a downstream consumer cannot mistake a local hand-off for remote
+  acceptance.
+
+### Fixed
+- A message handed to a local transport (e.g. `relay=mailreceipt`, `postfix/pipe`)
+  is no longer reported as "accepted by the remote mail server (SMTP 2xx)". A local
+  delivery now renders "Delivered locally — accepted by a local mail transport" with
+  a caveat that explicitly makes no remote-server or SMTP 2xx claim. The receipt
+  names the handoff it actually observed.
+
 ## [0.4.1] - 2026-06-08
 
 ### Fixed

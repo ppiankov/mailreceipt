@@ -17,6 +17,7 @@ package deliver
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ppiankov/mailreceipt/internal/eml"
@@ -27,8 +28,15 @@ import (
 type Outcome string
 
 const (
-	// Delivered: the remote MX accepted the message (SMTP 2xx). Transport only.
-	Delivered Outcome = "delivered"
+	// DeliveredRemote: a remote SMTP/LMTP relay accepted the message (SMTP 2xx) at
+	// relay handoff to a remote host[ip]. Transport only — the strongest claim the
+	// log supports.
+	DeliveredRemote Outcome = "delivered_remote"
+	// DeliveredLocal: a local Postfix transport (pipe/local/virtual, or a relay with
+	// no remote host[ip] such as relay=mailreceipt) accepted the message. The server
+	// handed it to a local mailbox/pipe/service — NOT relayed to a remote mail
+	// server, and NOT an SMTP 2xx from a remote MX.
+	DeliveredLocal Outcome = "delivered_local"
 	// Bounced: hard rejection (5xx) — it will not be delivered.
 	Bounced Outcome = "bounced"
 	// Deferred: temporary failure; Postfix will retry. Not yet delivered.
@@ -41,7 +49,19 @@ const (
 	// delivered, some not found). The overall verdict is neither — it is the mix.
 	// Only ever a whole-email summary, never a per-recipient outcome.
 	Mixed Outcome = "mixed"
+	// Delivered is a SUMMARY-ONLY value: every recipient was delivered, but across a
+	// mix of remote and local handoffs, so neither subtype describes the whole. It
+	// is never assigned to a single recipient (each carries delivered_remote or
+	// delivered_local). It makes "all delivered" read as success, not as "mixed".
+	Delivered Outcome = "delivered"
 )
+
+// IsDelivered reports whether an outcome is any delivered-class disposition
+// (remote or local). Summary/Counts use this so both count as delivered for the
+// overall verdict while the per-recipient distinction is preserved.
+func (o Outcome) IsDelivered() bool {
+	return o == DeliveredRemote || o == DeliveredLocal
+}
 
 // MatchMethod records how the recipient's events were linked, for the receipt's
 // provenance.
@@ -58,9 +78,12 @@ type RecipientResult struct {
 	Recipient string      `json:"recipient"`
 	Outcome   Outcome     `json:"outcome"`
 	Match     MatchMethod `json:"match_method"`
-	// Relay is the remote server that accepted/rejected, when known.
+	// Relay is the transport that accepted/rejected: a remote host[ip] for remote
+	// deliveries, or a local transport name (e.g. mailreceipt, local) for local ones.
 	Relay string `json:"relay,omitempty"`
-	// Response is the remote server's SMTP reply text (the literal proof).
+	// Response is the transport's reply text. For a remote delivery this is the
+	// remote server's SMTP reply (e.g. "250 2.0.0 OK"); for a local handoff it is the
+	// local transport's status text, NOT a remote SMTP reply.
 	Response string `json:"response,omitempty"`
 	// Time is when the delivery attempt was logged.
 	Time time.Time `json:"time,omitempty"`
@@ -78,9 +101,41 @@ type Result struct {
 	Caveat string `json:"caveat"`
 }
 
-// transportCaveat is attached to every Result so the limit is never implied
-// away: the log proves handoff to the remote MX, not human attention.
-const transportCaveat = "A 'delivered' outcome means the remote mail server accepted the message (SMTP 2xx) at relay handoff. It does not prove a person read it, that it passed spam filtering, or that it was not later discarded. This receipt reports transport, not attention."
+// The caveat is attached to every Result so the limit is never implied away. It is
+// chosen per result so it never claims a handoff the log did not show. A local-only
+// receipt uses localCaveat, which deliberately avoids the literal phrases "remote
+// mail server" and "SMTP 2xx" entirely (WO-27): a legal exhibit should not surface
+// those words at all when no remote relay was observed. A mixed receipt uses
+// mixedCaveat, which scopes each claim to its handoff type.
+const remoteCaveat = "A 'delivered' outcome means the remote mail server accepted the message (SMTP 2xx) at relay handoff. It does not prove a person read it, that it passed spam filtering, or that it was not later discarded. This receipt reports transport, not attention."
+
+const localCaveat = "A 'delivered local' outcome means this mail server handed the message to a local transport, mailbox, pipe, or service. No remote relay acceptance was observed. It does not prove onward delivery, human reading, spam placement, or downstream processing. This receipt reports transport, not attention."
+
+const mixedCaveat = "This receipt covers two handoff types. A 'delivered' (remote) outcome means a remote mail server accepted the message at relay handoff; a 'delivered local' outcome means this mail server handed the message to a local transport, with no remote relay acceptance observed. Neither proves a person read it, that it passed spam filtering, or that it was not later discarded. This receipt reports transport, not attention."
+
+// caveatFor picks the honest caveat for the set of recipient results. local-only =>
+// localCaveat; any mix of remote and local delivery => mixedCaveat (so a local
+// recipient is never described as remote acceptance, and vice versa); otherwise the
+// remote caveat.
+func caveatFor(recipients []RecipientResult) string {
+	anyRemote, anyLocal := false, false
+	for _, rr := range recipients {
+		switch rr.Outcome {
+		case DeliveredRemote:
+			anyRemote = true
+		case DeliveredLocal:
+			anyLocal = true
+		}
+	}
+	switch {
+	case anyLocal && !anyRemote:
+		return localCaveat
+	case anyLocal && anyRemote:
+		return mixedCaveat
+	default:
+		return remoteCaveat
+	}
+}
 
 // Window is the +/- span around the email's Date used for recipient-fallback
 // matching when no Message-ID is available.
@@ -92,7 +147,6 @@ func Analyze(e eml.Email, log maillog.Log) Result {
 	res := Result{
 		MessageID: e.MessageID,
 		Subject:   e.Subject,
-		Caveat:    transportCaveat,
 	}
 
 	for _, rcpt := range e.Recipients() {
@@ -102,6 +156,7 @@ func Analyze(e eml.Email, log maillog.Log) Result {
 	sort.Slice(res.Recipients, func(i, j int) bool {
 		return res.Recipients[i].Recipient < res.Recipients[j].Recipient
 	})
+	res.Caveat = caveatFor(res.Recipients)
 	return res
 }
 
@@ -151,7 +206,7 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log) RecipientResult
 	chosen := chooseEvent(events)
 	return RecipientResult{
 		Recipient: rcpt,
-		Outcome:   outcomeFor(chosen.Status),
+		Outcome:   outcomeFor(chosen),
 		Match:     method,
 		Relay:     chosen.Relay,
 		Response:  chosen.Response,
@@ -197,10 +252,17 @@ func terminalRank(s maillog.Status) int {
 	}
 }
 
-func outcomeFor(s maillog.Status) Outcome {
-	switch s {
+func outcomeFor(e maillog.Event) Outcome {
+	switch e.Status {
 	case maillog.StatusSent:
-		return Delivered
+		// status=sent through a remote network agent (smtp/lmtp) to a remote
+		// host[ip] is a remote-MX handoff. A local agent (pipe/local/virtual), or a
+		// relay with no remote host[ip] (e.g. relay=mailreceipt, relay=local), is a
+		// local handoff — a real delivery, but NOT to a remote mail server.
+		if isRemoteHandoff(e.Daemon, e.Relay) {
+			return DeliveredRemote
+		}
+		return DeliveredLocal
 	case maillog.StatusBounced:
 		return Bounced
 	case maillog.StatusDeferred:
@@ -208,6 +270,29 @@ func outcomeFor(s maillog.Status) Outcome {
 	default:
 		return NotFound
 	}
+}
+
+// isRemoteHandoff reports whether a status=sent event was relayed to a remote
+// mail server: a network delivery agent (smtp/lmtp) and a relay naming a remote
+// host with an [ip] literal. Postfix writes the remote relay as host[ip]:port; a
+// local transport writes a bare name (pipe, local, virtual) or relay=local with
+// no bracketed address.
+func isRemoteHandoff(daemon, relay string) bool {
+	switch daemon {
+	case "smtp", "lmtp":
+	default:
+		return false
+	}
+	// A remote relay carries a bracketed IP literal, e.g. mx.example[1.2.3.4]:25.
+	// relay=local / relay=mailreceipt / relay=none have no [ip] and are not remote.
+	if !strings.Contains(relay, "[") {
+		return false
+	}
+	r := strings.ToLower(strings.TrimSpace(relay))
+	if r == "" || strings.HasPrefix(r, "local") || strings.HasPrefix(r, "none") {
+		return false
+	}
+	return true
 }
 
 // Summary reduces the per-recipient results to a single headline outcome for the
@@ -225,17 +310,32 @@ func (r Result) Summary() Outcome {
 		return Deferred
 	case len(c) == 0:
 		return NotFound
-	case len(c) == 1:
-		// Exactly one distinct outcome across all recipients: that is the verdict
-		// (all delivered -> delivered; all not_found -> not_found).
+	}
+	// All-delivered (only delivered-class outcomes present) reads as delivered, even
+	// if the recipients split remote/local — that is success, not a partial mix.
+	delivered := c[DeliveredRemote] + c[DeliveredLocal]
+	if delivered > 0 && delivered == r.recipientCount() {
+		switch {
+		case c[DeliveredLocal] == 0:
+			return DeliveredRemote
+		case c[DeliveredRemote] == 0:
+			return DeliveredLocal
+		default:
+			return Delivered // all delivered, mixed transports
+		}
+	}
+	if len(c) == 1 {
+		// Exactly one distinct outcome across all recipients (e.g. all not_found).
 		for o := range c {
 			return o
 		}
 	}
-	// More than one distinct non-bounce/non-deferred outcome (e.g. delivered +
+	// More than one distinct outcome including a non-delivered one (e.g. delivered +
 	// not_found): the verdict is the mix, not the best or worst single row.
 	return Mixed
 }
+
+func (r Result) recipientCount() int { return len(r.Recipients) }
 
 // Counts tallies per-recipient outcomes. The headline and JSON summary_counts are
 // both derived from this, so the summary can never contradict the rows.

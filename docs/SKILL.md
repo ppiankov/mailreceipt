@@ -32,14 +32,14 @@ outcome: a recipient with no matching log line is reported `not_found`.
   "tool": "mailreceipt",
   "case": "CASE-001",
   "summary": "mixed",
-  "summary_counts": {"delivered": 4, "not_found": 1},
+  "summary_counts": {"delivered_remote": 4, "not_found": 1},
   "result": {
     "message_id": "sent-0001@acme.test",
     "subject": "RE: reminder",
     "recipients": [
       {
         "recipient": "docketing@client.test",
-        "outcome": "delivered",
+        "outcome": "delivered_remote",
         "match_method": "message_id",
         "relay": "mx.example.test[203.0.113.25]:25",
         "response": "250 2.6.0 Queued mail for delivery",
@@ -52,11 +52,25 @@ outcome: a recipient with no matching log line is reported `not_found`.
 }
 ```
 
-`summary` is one of `delivered`, `bounced`, `deferred`, `not_found`, or `mixed`
-(more than one outcome across recipients); `summary_counts` is the per-outcome
-tally the summary is derived from. Every delivered/bounced/deferred recipient
-carries a `citation` — the verbatim log line. The `outcome` and `response` are
-the mail server's own disposition, quoted, never a model's interpretation.
+Per-recipient `outcome` is one of `delivered_remote` (a remote SMTP/LMTP relay
+accepted the message at handoff to a remote host — the strongest claim the log
+supports), `delivered_local` (a local Postfix transport/pipe/mailbox accepted it —
+NOT relayed to a remote server, NOT an SMTP 2xx from a remote MX), `bounced`,
+`deferred`, or `not_found`.
+
+The whole-email `summary` is one of: `delivered_remote` (every recipient delivered
+remotely), `delivered_local` (every recipient delivered locally), `delivered`
+(every recipient delivered, but across a mix of remote and local — a summary-only
+value; per-recipient outcomes are still `delivered_remote`/`delivered_local`),
+`bounced`, `deferred`, `not_found`, or `mixed` (more than one outcome across
+recipients). A consumer should accept all seven values. `summary_counts` is the
+per-outcome tally the summary is derived from, keyed by the per-recipient outcome
+values (e.g. `delivered_remote`, `delivered_local`, `not_found`).
+
+A `delivered_local` receipt never claims a remote mail server or SMTP 2xx. Every
+delivered/bounced/deferred recipient carries a `citation` — the verbatim log line.
+The `outcome` and `response` are the mail server's own disposition, quoted, never a
+model's interpretation.
 
 **Exit codes:**
 - 0: analysis succeeded (any outcome, including bounced or not_found, is exit 0)
@@ -186,8 +200,10 @@ repeatedly against one server's log.
 
 ## What this does NOT do
 
-- Does not prove a human read the email — `delivered` means the remote server
-  accepted the message at relay handoff (SMTP 2xx), transport not attention.
+- Does not prove a human read the email — a `delivered_remote` outcome means a
+  remote server accepted the message at relay handoff (SMTP 2xx), and
+  `delivered_local` means a local transport accepted it; either way it is transport,
+  not attention.
 - Does not judge legal sufficiency — it states what the log shows; the case call
   is the operator's.
 - Does not send, retry, or modify mail — it reads logs the server already wrote.
@@ -214,9 +230,9 @@ repeatedly against one server's log.
 # Overall verdict and the per-outcome tally behind it:
 mailreceipt check mail.eml --log /var/log/mail.log --format json | jq '.summary, .summary_counts'
 
-# Just the delivered recipients, with their cited evidence:
+# Just the delivered recipients (remote or local), with their cited evidence:
 mailreceipt check mail.eml --log /var/log/mail.log --format json \
-  | jq '.result.recipients[] | select(.outcome == "delivered") | {recipient, citation}'
+  | jq '.result.recipients[] | select(.outcome == "delivered_remote" or .outcome == "delivered_local") | {recipient, outcome, citation}'
 
 # Is the log even usable before trusting a not_found?
 mailreceipt doctor --log /var/log/mail.log --format json | jq '.status'

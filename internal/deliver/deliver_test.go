@@ -39,7 +39,7 @@ func TestDeferredThenSentResolvesToDelivered(t *testing.T) {
 	res := Analyze(e, parseLog(t, sampleLog))
 
 	jdoe := find(res, "jdoe@exampleclient.test")
-	if jdoe.Outcome != Delivered {
+	if jdoe.Outcome != DeliveredRemote {
 		t.Fatalf("jdoe: want delivered (later sent supersedes deferred), got %s", jdoe.Outcome)
 	}
 	if !strings.Contains(jdoe.Citation, "status=sent") {
@@ -107,7 +107,7 @@ func TestRecipientFallbackWhenNoMessageID(t *testing.T) {
 	}
 	res := Analyze(e, parseLog(t, sampleLog))
 	jdoe := find(res, "jdoe@exampleclient.test")
-	if jdoe.Outcome != Delivered {
+	if jdoe.Outcome != DeliveredRemote {
 		t.Fatalf("fallback match: want delivered, got %s", jdoe.Outcome)
 	}
 	if jdoe.Match != MatchRecipient {
@@ -188,8 +188,17 @@ func resultWith(outcomes ...Outcome) Result {
 }
 
 func TestSummaryAllDelivered(t *testing.T) {
-	if got := resultWith(Delivered, Delivered).Summary(); got != Delivered {
-		t.Fatalf("all delivered -> delivered, got %s", got)
+	// All remote-delivered -> the remote subtype is the verdict.
+	if got := resultWith(DeliveredRemote, DeliveredRemote).Summary(); got != DeliveredRemote {
+		t.Fatalf("all delivered_remote -> delivered_remote, got %s", got)
+	}
+	// All local-delivered -> the local subtype.
+	if got := resultWith(DeliveredLocal, DeliveredLocal).Summary(); got != DeliveredLocal {
+		t.Fatalf("all delivered_local -> delivered_local, got %s", got)
+	}
+	// All delivered but mixed transports -> the summary-only Delivered (success).
+	if got := resultWith(DeliveredRemote, DeliveredLocal).Summary(); got != Delivered {
+		t.Fatalf("remote+local all-delivered -> delivered, got %s", got)
 	}
 }
 
@@ -200,20 +209,20 @@ func TestSummaryAllNotFound(t *testing.T) {
 }
 
 func TestSummaryAnyBounceWins(t *testing.T) {
-	if got := resultWith(Delivered, NotFound, Bounced).Summary(); got != Bounced {
+	if got := resultWith(DeliveredRemote, NotFound, Bounced).Summary(); got != Bounced {
 		t.Fatalf("any bounce must surface over a mix, got %s", got)
 	}
 }
 
 func TestSummaryDeferredOverMixNoBounce(t *testing.T) {
-	if got := resultWith(Delivered, NotFound, Deferred).Summary(); got != Deferred {
+	if got := resultWith(DeliveredRemote, NotFound, Deferred).Summary(); got != Deferred {
 		t.Fatalf("deferred (no bounce) must surface, got %s", got)
 	}
 }
 
 func TestSummaryDeliveredPlusNotFoundIsMixed(t *testing.T) {
 	// The incident case: 4 delivered + 1 not_found must be mixed, never not_found.
-	got := resultWith(Delivered, Delivered, Delivered, Delivered, NotFound).Summary()
+	got := resultWith(DeliveredRemote, DeliveredRemote, DeliveredRemote, DeliveredRemote, NotFound).Summary()
 	if got != Mixed {
 		t.Fatalf("delivered+not_found must be mixed, got %s", got)
 	}
@@ -221,18 +230,77 @@ func TestSummaryDeliveredPlusNotFoundIsMixed(t *testing.T) {
 
 func TestSummaryNeverContradictsRows(t *testing.T) {
 	// Invariant: if any recipient is delivered, the summary is never not_found.
-	res := resultWith(Delivered, NotFound)
+	res := resultWith(DeliveredRemote, NotFound)
 	if got := res.Summary(); got == NotFound {
 		t.Fatalf("summary must not be not_found while a row is delivered, got %s", got)
 	}
 }
 
 func TestCounts(t *testing.T) {
-	c := resultWith(Delivered, Delivered, Delivered, Delivered, NotFound).Counts()
-	if c[Delivered] != 4 || c[NotFound] != 1 {
+	c := resultWith(DeliveredRemote, DeliveredRemote, DeliveredRemote, DeliveredRemote, NotFound).Counts()
+	if c[DeliveredRemote] != 4 || c[NotFound] != 1 {
 		t.Fatalf("counts wrong: %+v", c)
 	}
 	if len(c) != 2 {
 		t.Fatalf("only two distinct outcomes expected, got %d", len(c))
+	}
+}
+
+// WO-27: the real incident line — a local Postfix pipe handoff (relay=mailreceipt,
+// postfix/pipe) must classify as delivered_local, never delivered_remote, and the
+// receipt must never claim a remote mail server or SMTP 2xx for it.
+const localPipeLog = `2026-06-08T19:08:55.038187+02:00 mail postfix/cleanup[3955455]: 90D9F160065F: message-id=<local-1@acme.test>
+2026-06-08T19:08:55.038187+02:00 mail postfix/pipe[3955456]: 90D9F160065F: to=<receipt@acme.test>, relay=mailreceipt, delay=1.9, delays=1.9/0/0/0.02, dsn=2.0.0, status=sent (delivered via mailreceipt service)
+`
+
+func TestLocalPipeHandoffIsDeliveredLocal(t *testing.T) {
+	e := eml.Email{MessageID: "local-1@acme.test", To: []string{"receipt@acme.test"}}
+	res := Analyze(e, parseLog(t, localPipeLog))
+	rr := find(res, "receipt@acme.test")
+	if rr.Outcome != DeliveredLocal {
+		t.Fatalf("relay=mailreceipt pipe handoff must be delivered_local, got %s", rr.Outcome)
+	}
+	// WO-27 rev4: a local-only receipt must not render the literal phrases at all,
+	// not even in a negating clause (a legal exhibit should not surface them).
+	for _, bad := range []string{"remote mail server", "SMTP 2xx"} {
+		if strings.Contains(res.Caveat, bad) {
+			t.Fatalf("local-only caveat must not contain %q, got: %s", bad, res.Caveat)
+		}
+	}
+	if !strings.Contains(res.Caveat, "delivered local") {
+		t.Fatalf("local-only receipt should use the local caveat, got: %s", res.Caveat)
+	}
+}
+
+// WO-27 rev4: a mixed remote+local receipt must not use a remote-only caveat that
+// would describe the local recipient as remote SMTP acceptance, nor a local-only
+// caveat that would understate the remote recipient.
+func TestMixedRemoteLocalCaveatCoversBoth(t *testing.T) {
+	c := caveatFor([]RecipientResult{
+		{Recipient: "a@x.test", Outcome: DeliveredRemote},
+		{Recipient: "b@x.test", Outcome: DeliveredLocal},
+	})
+	if c == remoteCaveat {
+		t.Fatal("mixed remote+local must NOT use the remote-only caveat")
+	}
+	if c == localCaveat {
+		t.Fatal("mixed remote+local must NOT use the local-only caveat")
+	}
+	// The mixed caveat scopes each claim; it must not flatly assert SMTP 2xx for all.
+	if strings.Contains(c, "accepted the message (SMTP 2xx)") {
+		t.Fatalf("mixed caveat must not globally assert SMTP 2xx, got: %s", c)
+	}
+}
+
+func TestRemoteSmtpHandoffIsDeliveredRemote(t *testing.T) {
+	// A normal remote smtp line (relay=mx.host[ip], status=sent (250 ...)).
+	e := eml.Email{MessageID: "reminder-1509@example-ip.test", To: []string{"jdoe@exampleclient.test"}}
+	res := Analyze(e, parseLog(t, sampleLog))
+	rr := find(res, "jdoe@exampleclient.test")
+	if rr.Outcome != DeliveredRemote {
+		t.Fatalf("remote smtp handoff must be delivered_remote, got %s", rr.Outcome)
+	}
+	if !strings.Contains(res.Caveat, "remote mail server") {
+		t.Fatalf("remote receipt should keep the remote-server caveat, got: %s", res.Caveat)
 	}
 }

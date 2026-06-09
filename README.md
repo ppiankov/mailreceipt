@@ -17,20 +17,23 @@ mailreceipt check reminder.eml --log /var/log/mail.log --case CASE-001
 # Mail Delivery Receipt
 
 **Case:** CASE-001
-**Overall:** Bounced — hard-rejected, not delivered
+**Overall:** Mixed — 1 delivered (remote), 1 delivered (local), 1 bounced
 
-| Recipient                | Outcome      | When             | Evidence |
-|--------------------------|--------------|------------------|----------|
-| jdoe@exampleclient.test  | ✅ delivered | 2026-06-05 15:41 | 250 2.0.0 OK |
-| team@exampleclient.test  | ⛔ bounced   | 2026-06-05 15:09 | 550 5.1.1 User unknown |
+| Recipient                | Outcome              | When             | Evidence |
+|--------------------------|----------------------|------------------|----------|
+| jdoe@exampleclient.test  | ✅ delivered         | 2026-06-05 15:41 | 250 2.0.0 OK |
+| filing@exampleclient.test| 📥 delivered (local) | 2026-06-05 15:41 | delivered via mailreceipt service |
+| team@exampleclient.test  | ⛔ bounced           | 2026-06-05 15:09 | 550 5.1.1 User unknown |
 
 ## Evidence (verbatim log lines)
-- jdoe@…:  Jun 5 15:41:55 … status=sent (250 2.0.0 OK: queued as D4E5F6)
-- team@…:  Jun 5 15:09:21 … status=bounced (… 550 5.1.1 … User unknown …)
+- jdoe@…:    Jun 5 15:41:55 … postfix/smtp … relay=mx.client[203.0.113.25]:25 … status=sent (250 2.0.0 OK)
+- filing@…:  Jun 5 15:41:55 … postfix/pipe … relay=mailreceipt … status=sent (delivered via mailreceipt service)
+- team@…:    Jun 5 15:09:21 … status=bounced (… 550 5.1.1 … User unknown …)
 
-> A 'delivered' outcome means the remote mail server accepted the message
-> (SMTP 2xx) at relay handoff. It does not prove a person read it.
-> This receipt reports transport, not attention.
+> This receipt covers two handoff types. A 'delivered' (remote) outcome means a
+> remote mail server accepted the message at relay handoff; a 'delivered local'
+> outcome means this mail server handed the message to a local transport, with no
+> remote relay acceptance observed. This receipt reports transport, not attention.
 ```
 
 Every outcome is the disposition your mail server recorded, quoted verbatim.
@@ -38,7 +41,8 @@ No model in the delivery path — a 250 is a 250, a 550 is a 550.
 
 ## What the receipt proves
 
-- **Delivered** — the remote mail server accepted the message (SMTP 2xx) at relay handoff
+- **Delivered (remote)** — a remote mail server accepted the message (SMTP 2xx) at relay handoff
+- **Delivered (local)** — a local transport (pipe/mailbox/service) accepted it; *not* relayed to a remote server, *not* an SMTP 2xx. The receipt says so, and never claims otherwise
 - **Bounced** — permanent rejection (5xx); the message will not be retried
 - **Deferred** — temporary failure (4xx); the message is in queue
 - **Not found** — no matching log entry; the tool will not invent an outcome

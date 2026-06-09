@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/ppiankov/mailreceipt/internal/deliver"
+	"github.com/ppiankov/mailreceipt/internal/eml"
+	"github.com/ppiankov/mailreceipt/internal/maillog"
 )
 
 func sampleReceipt() Receipt {
@@ -16,7 +18,7 @@ func sampleReceipt() Receipt {
 		Recipients: []deliver.RecipientResult{
 			{
 				Recipient: "a@client.test",
-				Outcome:   deliver.Delivered,
+				Outcome:   deliver.DeliveredRemote,
 				Match:     deliver.MatchMessageID,
 				Response:  "250 2.0.0 OK",
 				Citation:  "Jun  5 02:37:14 mail01 postfix/smtp[20120]: 4F1A2B3C01: to=<a@client.test>, status=sent (250 2.0.0 OK)",
@@ -152,7 +154,7 @@ func mixedReceipt() Receipt {
 	for i := 0; i < 4; i++ {
 		rr = append(rr, deliver.RecipientResult{
 			Recipient: string(rune('a'+i)) + "@client.test",
-			Outcome:   deliver.Delivered,
+			Outcome:   deliver.DeliveredRemote,
 			Response:  "250 2.6.0 Queued mail for delivery",
 		})
 	}
@@ -165,7 +167,7 @@ func mixedReceipt() Receipt {
 
 func TestMixedHeadlineStatesCountsAndDoesNotContradictTable(t *testing.T) {
 	md := mixedReceipt().Markdown()
-	if !strings.Contains(md, "**Overall:** Mixed — 4 delivered, 1 not found") {
+	if !strings.Contains(md, "**Overall:** Mixed — 4 delivered (remote), 1 not found") {
 		t.Fatalf("mixed headline must state the counts; got markdown:\n%s", md)
 	}
 	// The regression we are guarding: the headline must NOT say "Not found"
@@ -191,8 +193,39 @@ func TestSummaryCountsInJSON(t *testing.T) {
 		t.Fatalf("json summary should be mixed:\n%s", s)
 	}
 	if !strings.Contains(s, `"summary_counts"`) ||
-		!strings.Contains(s, `"delivered": 4`) ||
+		!strings.Contains(s, `"delivered_remote": 4`) ||
 		!strings.Contains(s, `"not_found": 1`) {
 		t.Fatalf("json must carry summary_counts with per-outcome tallies:\n%s", s)
+	}
+}
+
+// WO-27: a local-only delivery receipt must render the local wording and must NEVER
+// say "remote mail server" or "SMTP 2xx" in any part (headline, outcome, evidence,
+// or caveat).
+func localReceipt() Receipt {
+	// Exercise the real path: a local pipe handoff (relay=mailreceipt, postfix/pipe)
+	// analyzed end-to-end, so the caveat is the genuine local caveat.
+	log := maillog.Parse(strings.NewReader(
+		"2026-06-08T19:08:55+02:00 mail postfix/cleanup[1]: 90D9F160065F: message-id=<local-1@acme.test>\n"+
+			"2026-06-08T19:08:55+02:00 mail postfix/pipe[2]: 90D9F160065F: to=<receipt@acme.test>, relay=mailreceipt, status=sent (delivered via mailreceipt service)\n",
+	), 2026)
+	res := deliver.Analyze(eml.Email{MessageID: "local-1@acme.test", To: []string{"receipt@acme.test"}}, log)
+	return New(res, "CASE-LOCAL", time.Time{})
+}
+
+func TestLocalReceiptNeverClaimsRemote(t *testing.T) {
+	// WO-27 rev4: a local-only receipt must not render the literal phrases AT ALL —
+	// not even in a negating clause — in any part (headline, outcome, evidence,
+	// caveat/limitation) of either rendering.
+	for _, body := range []string{localReceipt().Markdown(), localReceipt().PlainText()} {
+		for _, bad := range []string{"remote mail server", "SMTP 2xx"} {
+			if strings.Contains(body, bad) {
+				t.Fatalf("local receipt must not contain %q:\n%s", bad, body)
+			}
+		}
+	}
+	pt := localReceipt().PlainText()
+	if !strings.Contains(pt, "DELIVERED LOCAL") && !strings.Contains(pt, "DELIVERED_LOCAL") {
+		t.Fatalf("local plain-text receipt should name the local delivery, got:\n%s", pt)
 	}
 }

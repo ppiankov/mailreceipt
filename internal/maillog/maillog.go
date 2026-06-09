@@ -39,6 +39,7 @@ type Event struct {
 	MessageID string    `json:"message_id,omitempty"`
 	To        string    `json:"to"`
 	Relay     string    `json:"relay,omitempty"`
+	Daemon    string    `json:"daemon,omitempty"` // postfix delivery agent: smtp, lmtp, pipe, local, virtual
 	Status    Status    `json:"status"`
 	Response  string    `json:"response,omitempty"` // the remote server's text, e.g. "250 2.0.0 OK"
 	Time      time.Time `json:"time,omitempty"`
@@ -59,7 +60,7 @@ var (
 	// We capture the timestamp, the queue id, and the remainder. The timestamp is
 	// either the traditional BSD form ("Jun  5 14:09:36") or the RFC3339/ISO-8601
 	// form modern rsyslog emits by default ("2026-06-05T14:09:36.750604+02:00").
-	lineRe = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/\w+\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
+	lineRe = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/(?P<daemon>\w+)\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
 
 	messageIDRe = regexp.MustCompile(`message-id=<?([^>\s,]+)>?`)
 	toRe        = regexp.MustCompile(`\bto=<([^>]*)>`)
@@ -110,7 +111,7 @@ func Parse(r io.Reader, year int) Log {
 		if m == nil {
 			continue
 		}
-		tsRaw, qid, rest := m[1], m[2], m[3]
+		tsRaw, daemon, qid, rest := m[1], m[2], m[3], m[4]
 
 		// cleanup line: record queue-id -> message-id and move on.
 		if mid := messageIDRe.FindStringSubmatch(rest); mid != nil {
@@ -128,6 +129,7 @@ func Parse(r io.Reader, year int) Log {
 		}
 		ev := Event{
 			QueueID: qid,
+			Daemon:  strings.ToLower(daemon),
 			Status:  classify(st[1]),
 			RawLine: line,
 			TimeRaw: tsRaw,

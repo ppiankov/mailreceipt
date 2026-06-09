@@ -49,7 +49,7 @@ func TestFilterHappyPathWritesReplyEmail(t *testing.T) {
 		t.Fatalf("reply Date should be RFC5322-parseable, got %q: %v", msg.Header.Get("Date"), err)
 	}
 	_, _, textBody := filterTextPart(t, out)
-	if !strings.Contains(textBody, "status=sent") || !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered"`) {
+	if !strings.Contains(textBody, "status=sent") || !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered_remote"`) {
 		t.Fatalf("happy path should include cited delivered outcome, got:\n%s", out)
 	}
 }
@@ -234,7 +234,7 @@ func TestFilterAuthorizesWhenFromSharesTeamEvenIfSenderDoesNot(t *testing.T) {
 	sent := sentMailWithHeaders("sent-1@acme.test", "client@example.test",
 		"From: Attorney <attorney1@acme.test>\nSender: Other <other@acme.test>")
 	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sent), filterConfig)
-	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered"`) {
+	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered_remote"`) {
 		t.Fatalf("From sharing team should authorize even when Sender does not, got:\n%s", out)
 	}
 }
@@ -243,7 +243,7 @@ func TestFilterAuthorizesWhenSenderSharesTeam(t *testing.T) {
 	sent := sentMailWithHeaders("sent-1@acme.test", "client@example.test",
 		"From: Other <other@acme.test>\nSender: Attorney <attorney1@acme.test>")
 	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sent), filterConfig)
-	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered"`) {
+	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered_remote"`) {
 		t.Fatalf("Sender sharing team should authorize, got:\n%s", out)
 	}
 }
@@ -262,7 +262,7 @@ func TestFilterUsesWholeDomainWhenNoTeamsConfigured(t *testing.T) {
   domains: [acme.test]
 `
 	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("sent-1@acme.test", "client@example.test")), cfg)
-	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered"`) {
+	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered_remote"`) {
 		t.Fatalf("no teams should fall back to whole-domain authorization, got:\n%s", out)
 	}
 }

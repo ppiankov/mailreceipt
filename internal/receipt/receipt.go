@@ -163,7 +163,11 @@ func (r Receipt) PlainText() string {
 func headline(o deliver.Outcome, counts map[deliver.Outcome]int) string {
 	switch o {
 	case deliver.Delivered:
+		return "Delivered — accepted at relay handoff (remote and local recipients)"
+	case deliver.DeliveredRemote:
 		return "Delivered — accepted by the remote mail server"
+	case deliver.DeliveredLocal:
+		return "Delivered locally — accepted by a local mail transport"
 	case deliver.Bounced:
 		return "Bounced — hard-rejected, not delivered"
 	case deliver.Deferred:
@@ -180,14 +184,15 @@ func headline(o deliver.Outcome, counts map[deliver.Outcome]int) string {
 // outcomeOrder fixes the display order so mixed headlines and JSON are
 // deterministic regardless of recipient order.
 var outcomeOrder = []deliver.Outcome{
-	deliver.Delivered, deliver.Bounced, deliver.Deferred, deliver.NotFound,
+	deliver.DeliveredRemote, deliver.DeliveredLocal, deliver.Bounced, deliver.Deferred, deliver.NotFound,
 }
 
 var outcomeWords = map[deliver.Outcome]string{
-	deliver.Delivered: "delivered",
-	deliver.Bounced:   "bounced",
-	deliver.Deferred:  "deferred",
-	deliver.NotFound:  "not found",
+	deliver.DeliveredRemote: "delivered (remote)",
+	deliver.DeliveredLocal:  "delivered (local)",
+	deliver.Bounced:         "bounced",
+	deliver.Deferred:        "deferred",
+	deliver.NotFound:        "not found",
 }
 
 // countsPhrase renders "4 delivered, 1 not found" in a stable outcome order.
@@ -204,7 +209,11 @@ func countsPhrase(counts map[deliver.Outcome]int) string {
 func plainHeadline(o deliver.Outcome, counts map[deliver.Outcome]int) string {
 	switch o {
 	case deliver.Delivered:
+		return "DELIVERED - accepted at relay handoff (remote and local recipients)"
+	case deliver.DeliveredRemote:
 		return "DELIVERED - accepted by the remote mail server"
+	case deliver.DeliveredLocal:
+		return "DELIVERED LOCAL - accepted by a local mail transport"
 	case deliver.Bounced:
 		return "BOUNCED - hard-rejected, not delivered"
 	case deliver.Deferred:
@@ -220,8 +229,10 @@ func plainHeadline(o deliver.Outcome, counts map[deliver.Outcome]int) string {
 
 func plainOutcome(o deliver.Outcome) string {
 	switch o {
-	case deliver.Delivered:
+	case deliver.DeliveredRemote:
 		return "DELIVERED"
+	case deliver.DeliveredLocal:
+		return "DELIVERED_LOCAL"
 	case deliver.Bounced:
 		return "BOUNCED"
 	case deliver.Deferred:
@@ -234,6 +245,14 @@ func plainOutcome(o deliver.Outcome) string {
 }
 
 func plainEvidence(rr deliver.RecipientResult) string {
+	// A local handoff has no remote SMTP reply to quote; name the local transport
+	// instead so the receipt never implies a remote-server response it did not see.
+	if rr.Outcome == deliver.DeliveredLocal {
+		if rr.Relay != "" {
+			return "accepted by local mail transport " + rr.Relay
+		}
+		return "accepted by a local mail transport"
+	}
 	if rr.Response != "" {
 		return rr.Response
 	}
@@ -244,7 +263,8 @@ func plainEvidence(rr deliver.RecipientResult) string {
 }
 
 // countsJSON converts the outcome tally to string-keyed counts for the JSON
-// artifact (e.g. {"delivered": 4, "not_found": 1}).
+// artifact, keyed by the per-recipient outcome values
+// (e.g. {"delivered_remote": 4, "not_found": 1}).
 func countsJSON(counts map[deliver.Outcome]int) map[string]int {
 	out := make(map[string]int, len(counts))
 	for o, n := range counts {
@@ -255,8 +275,10 @@ func countsJSON(counts map[deliver.Outcome]int) map[string]int {
 
 func badge(o deliver.Outcome) string {
 	switch o {
-	case deliver.Delivered:
+	case deliver.DeliveredRemote:
 		return "✅ delivered"
+	case deliver.DeliveredLocal:
+		return "📥 delivered (local)"
 	case deliver.Bounced:
 		return "⛔ bounced"
 	case deliver.Deferred:
