@@ -152,10 +152,14 @@ func parseDovecotLine(line string, year int) (Event, bool) {
 		RawLine:  line,
 		TimeRaw:  tsRaw,
 	}
-	// Recipient: the address inside lda(...)/lmtp(...). LDA puts it directly; LMTP
-	// may include a PID first, so take the first email-looking token in the group.
+	// Recipient inside lda(...)/lmtp(...). Dovecot logs either a full address
+	// (lda(user@dom)) or a bare mailbox username (lda(clerk)). Prefer a full
+	// address; else take the bare username (the leading token before any PID/comma).
+	// The deliver layer matches a bare username against the recipient's local-part.
 	if addr := emailInTextRe.FindString(who); addr != "" {
 		ev.To = strings.ToLower(addr)
+	} else if u := strings.TrimSpace(strings.SplitN(who, ",", 2)[0]); u != "" {
+		ev.To = strings.ToLower(u)
 	}
 	if mid := dovecotMsgIDRe.FindStringSubmatch(line); mid != nil {
 		ev.MessageID = strings.ToLower(strings.Trim(mid[1], "<>"))

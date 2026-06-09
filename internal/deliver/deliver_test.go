@@ -334,15 +334,41 @@ func TestNotFoundNoTraceHasNoNote(t *testing.T) {
 // WO-34: an internal message delivered by Dovecot (Postfix mailbox_command=dovecot-lda)
 // resolves to delivered_local, not not_found.
 func TestDovecotInternalDeliveryIsDeliveredLocal(t *testing.T) {
-	log := parseLog(t, `2026-06-09T09:28:51+02:00 mail KLMS: not processed: message-id="<dv-1@acme.test>": rcpt-to="auser@acme.test"
-2026-06-09T09:28:52+02:00 mail dovecot: lda(auser@acme.test): msgid=<dv-1@acme.test>: saved mail to INBOX
+	log := parseLog(t, `2026-06-09T09:28:51+02:00 mail KLMS: not processed: message-id="<dv-1@acme.test>": rcpt-to="a.user@acme.test"
+2026-06-09T09:28:52+02:00 mail dovecot: lda(a.user)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: msgid=<dv-1@acme.test>: saved mail to INBOX
 `)
-	res := Analyze(eml.Email{MessageID: "dv-1@acme.test", To: []string{"auser@acme.test"}}, log)
-	rr := find(res, "auser@acme.test")
+	res := Analyze(eml.Email{MessageID: "dv-1@acme.test", To: []string{"a.user@acme.test"}}, log)
+	rr := find(res, "a.user@acme.test")
 	if rr.Outcome != DeliveredLocal {
 		t.Fatalf("dovecot internal delivery must be delivered_local, got %s", rr.Outcome)
 	}
 	if strings.Contains(res.Caveat, "accepted the message (SMTP 2xx)") {
 		t.Fatalf("dovecot local delivery must not affirm SMTP 2xx, got: %s", res.Caveat)
+	}
+}
+
+// WO-34: /etc/aliases remaps an address to an unrelated mailbox username; the
+// Dovecot save logs the mailbox name, not the address. For a SOLE recipient, the
+// Message-ID join attributes the delivery correctly despite the name mismatch.
+func TestDovecotAliasRemappedSoleRecipientMatchesByMessageID(t *testing.T) {
+	log := parseLog(t, `2026-06-09T15:38:54+02:00 mail dovecot: lda(clerk)<4050777><sess>: msgid=<alias1@p.com>: saved mail to INBOX
+`)
+	res := Analyze(eml.Email{MessageID: "alias1@p.com", To: []string{"p.jones@acme.test"}}, log)
+	rr := find(res, "p.jones@acme.test")
+	if rr.Outcome != DeliveredLocal || rr.Match != MatchMessageID {
+		t.Fatalf("aliased sole-recipient dovecot save should be delivered_local by message_id, got outcome=%s match=%s", rr.Outcome, rr.Match)
+	}
+}
+
+// WO-34: with MULTIPLE recipients, an aliased Dovecot save whose mailbox name
+// matches none of them must NOT be mis-attributed — honesty over a guess.
+func TestDovecotAliasRemappedMultiRecipientDoesNotMisattribute(t *testing.T) {
+	log := parseLog(t, `2026-06-09T15:38:54+02:00 mail dovecot: lda(clerk)<1><s>: msgid=<m1@p.com>: saved mail to INBOX
+`)
+	res := Analyze(eml.Email{MessageID: "m1@p.com", To: []string{"a@acme.test", "b@acme.test"}}, log)
+	for _, r := range res.Recipients {
+		if r.Outcome != NotFound {
+			t.Fatalf("ambiguous aliased save must not be attributed; %s got %s", r.Recipient, r.Outcome)
+		}
 	}
 }

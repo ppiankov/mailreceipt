@@ -107,14 +107,14 @@ func TestParseMixedTimestampFormats(t *testing.T) {
 // WO-34: Dovecot LDA/LMTP local mailbox deliveries (the common Postfix+Dovecot
 // internal-delivery path) are parsed as delivery events.
 func TestParseDovecotLDADelivery(t *testing.T) {
-	const log = `2026-06-09T09:28:52+02:00 mail dovecot: lda(auser@acme.test): msgid=<dv-1@acme.test>: saved mail to INBOX
+	const log = `2026-06-09T09:28:52+02:00 mail dovecot: lda(a.user)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: msgid=<dv-1@acme.test>: saved mail to INBOX
 `
 	l := Parse(strings.NewReader(log), 2026)
 	if len(l.Events) != 1 {
 		t.Fatalf("dovecot lda save should yield 1 event, got %d", len(l.Events))
 	}
 	e := l.Events[0]
-	if e.Daemon != "dovecot" || e.Status != StatusSent || e.To != "auser@acme.test" || e.MessageID != "dv-1@acme.test" {
+	if e.Daemon != "dovecot" || e.Status != StatusSent || e.To != "a.user" || e.MessageID != "dv-1@acme.test" {
 		t.Fatalf("dovecot event fields wrong: %+v", e)
 	}
 }

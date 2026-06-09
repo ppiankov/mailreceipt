@@ -12,9 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Postfix + Dovecot setup, Postfix hands internal mail to `dovecot-lda`, which logs
   the mailbox save under the `dovecot` tag rather than as a `postfix/local` line —
   so internal deliveries previously showed as `not_found`. A Dovecot `saved mail to`
-  line is now parsed and reported as `delivered_local` (a local mailbox handoff, not
-  a remote-server acceptance), correlated by `msgid`. Dovecot error/discard lines
-  are not treated as delivery.
+  line is now reported as `delivered_local` (a local mailbox handoff, not a
+  remote-server acceptance). Dovecot logs the final **mailbox name** after
+  `/etc/aliases` remapping (often a bare username unrelated to the address), so the
+  correlation joins on the **Message-ID**, which survives every alias hop: for a
+  single-recipient message the delivery is attributed even when the mailbox name
+  differs from the address. With multiple recipients and an alias-remapped mailbox
+  that matches none of them, the delivery is left `not_found` rather than guessed.
+  Dovecot error/discard lines are not treated as delivery.
 
 ## [0.5.1] - 2026-06-09
 

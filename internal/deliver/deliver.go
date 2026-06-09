@@ -161,8 +161,10 @@ func Analyze(e eml.Email, log maillog.Log) Result {
 		Subject:   e.Subject,
 	}
 
-	for _, rcpt := range e.Recipients() {
-		res.Recipients = append(res.Recipients, analyzeRecipient(e, rcpt, log))
+	recipients := e.Recipients()
+	sole := len(recipients) == 1
+	for _, rcpt := range recipients {
+		res.Recipients = append(res.Recipients, analyzeRecipient(e, rcpt, log, sole))
 	}
 	// Stable order for deterministic output/tests.
 	sort.Slice(res.Recipients, func(i, j int) bool {
@@ -172,13 +174,42 @@ func Analyze(e eml.Email, log maillog.Log) Result {
 	return res
 }
 
-func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log) RecipientResult {
+// recipientMatches reports whether a log event's recipient identifies the wanted
+// recipient. It matches a full address exactly, and also matches a bare mailbox
+// username (as Dovecot logs it, e.g. "clerk") against the local-part of the
+// wanted address ("clerk@acme.test"). WO-34: Dovecot LDA often logs the
+// bare username, not the full address.
+func recipientMatches(evTo, want string) bool {
+	evTo = strings.ToLower(strings.TrimSpace(evTo))
+	want = strings.ToLower(strings.TrimSpace(want))
+	if evTo == "" {
+		return false
+	}
+	if evTo == want {
+		return true
+	}
+	// Bare username (no @) matches the recipient's local-part.
+	if !strings.Contains(evTo, "@") {
+		if i := strings.Index(want, "@"); i > 0 && evTo == want[:i] {
+			return true
+		}
+	}
+	return false
+}
+
+func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) RecipientResult {
 	// 1) Strongest link: Message-ID, then filter to this recipient.
 	var events []maillog.Event
 	method := MatchNone
 	if e.MessageID != "" {
 		for _, ev := range log.EventsForMessageID(e.MessageID) {
-			if ev.To == rcpt {
+			// Normal correlation: the event's recipient identifies this recipient.
+			// WO-34: a Dovecot save logs the FINAL mailbox name after /etc/aliases
+			// remapping, which often differs from the address. The Message-ID is the
+			// same across every alias hop, so when this is the message's only
+			// recipient, a Message-ID-matched Dovecot save is unambiguously theirs
+			// even when the mailbox name does not match the address.
+			if recipientMatches(ev.To, rcpt) || (sole && ev.Daemon == "dovecot") {
 				events = append(events, ev)
 			}
 		}
