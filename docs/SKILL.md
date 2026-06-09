@@ -15,7 +15,9 @@ go install github.com/ppiankov/mailreceipt/cmd/mailreceipt@latest
 ### mailreceipt check
 
 Reads a dropped email (RFC822 file or a pasted top-of-thread block, or stdin) and
-a Postfix mail log, then reports a cited delivery outcome per recipient. Correlates
+a mail log (Postfix delivery lines, plus Dovecot LDA/LMTP local-delivery lines for
+the common Postfix + Dovecot internal-delivery path), then reports a cited delivery
+outcome per recipient. Correlates
 by Message-ID when present, else by recipient + time window. Never invents an
 outcome: a recipient with no matching log line is reported `not_found`.
 

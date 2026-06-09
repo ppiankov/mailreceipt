@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Dovecot LDA/LMTP local-delivery lines are now recognized. On the common
+  Postfix + Dovecot setup, Postfix hands internal mail to `dovecot-lda`, which logs
+  the mailbox save under the `dovecot` tag rather than as a `postfix/local` line —
+  so internal deliveries previously showed as `not_found`. A Dovecot `saved mail to`
+  line is now parsed and reported as `delivered_local` (a local mailbox handoff, not
+  a remote-server acceptance), correlated by `msgid`. Dovecot error/discard lines
+  are not treated as delivery.
+
 ## [0.5.1] - 2026-06-09
 
 ### Added

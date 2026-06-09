@@ -212,9 +212,12 @@ mail.log  ──► parse to per-recipient delivery events  [internal/maillog]
 
 ## Limitations
 
-- **Postfix syslog format** only. Exim, Sendmail, journald/JSON not yet supported.
-  Both timestamp styles are read: traditional BSD (`Jun  5 14:09:36`) and
-  RFC3339 / ISO-8601 (`2026-06-05T14:09:36+02:00`, the modern rsyslog default).
+- **Postfix syslog format**, plus **Dovecot LDA/LMTP** local-delivery lines (the
+  common Postfix + Dovecot setup where internal mail is delivered by
+  `dovecot-lda` — a Dovecot mailbox save is reported as `delivered_local`). Exim,
+  Sendmail, journald/JSON not yet supported. Both timestamp styles are read:
+  traditional BSD (`Jun  5 14:09:36`) and RFC3339 / ISO-8601
+  (`2026-06-05T14:09:36+02:00`, the modern rsyslog default).
 - **Self-hosted / relayed mail only.** If your mail goes through Gmail or
   Microsoft 365 with no local log, there is nothing to read.
 - **Year-less BSD timestamps** default to the current year; set `--log-year`

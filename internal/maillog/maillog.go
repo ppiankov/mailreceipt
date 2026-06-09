@@ -80,8 +80,21 @@ var (
 	// of optional quote and angle brackets.
 	anyMessageIDRe = regexp.MustCompile(`(?i)message-id=["']?<?([^>"'\s,]+)>?`)
 	toRe           = regexp.MustCompile(`\bto=<([^>]*)>`)
-	relayRe        = regexp.MustCompile(`\brelay=([^,]+)`)
-	statusRe       = regexp.MustCompile(`\bstatus=(\w+)\s*(?:\((.*)\))?`)
+
+	// WO-34: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda, or
+	// LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines are a
+	// LOCAL mailbox handoff -> delivered_local. We match the leading timestamp + host,
+	// then a dovecot lda()/lmtp() line whose recipient and msgid we extract, plus the
+	// "saved mail to <mailbox>" success marker. Tolerant of version-specific extra
+	// fields (PID, <session>, +X ms).
+	dovecotLineRe  = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+dovecot:\s+(?P<agent>lda|lmtp)\((?P<who>[^)]*)\).*$`)
+	dovecotMsgIDRe = regexp.MustCompile(`(?i)msgid=<?([^>\s,]+)>?`)
+	dovecotSaveRe  = regexp.MustCompile(`(?i)saved mail to\s+(.+?)\s*$`)
+	// lmtpRcptRe pulls a recipient out of the dovecot agent parenthetical when it is
+	// an address (LDA: lda(user@dom); LMTP often lmtp(PID, user@dom) or lmtp(PID)).
+	emailInTextRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+`)
+	relayRe       = regexp.MustCompile(`\brelay=([^,]+)`)
+	statusRe      = regexp.MustCompile(`\bstatus=(\w+)\s*(?:\((.*)\))?`)
 )
 
 // Traditional BSD syslog timestamps have no year; callers pass the year the log
@@ -110,6 +123,49 @@ func parseTimestamp(tsRaw string, year int) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// parseDovecotLine recognizes a Dovecot LDA/LMTP local mailbox delivery, e.g.:
+//
+//	... dovecot: lda(auser@acme.test): msgid=<id>: saved mail to INBOX
+//	... dovecot: lmtp(1234, user@dom): ... msgid=<id>: ... saved mail to INBOX
+//
+// A "saved mail to" line is a successful LOCAL mailbox handoff -> the event's
+// Daemon is set to "dovecot" so the deliver layer classifies it delivered_local
+// (never remote/SMTP-2xx). Returns ok=false for any dovecot line that is not a
+// completed save (so deferrals/errors are not treated as delivery).
+func parseDovecotLine(line string, year int) (Event, bool) {
+	m := dovecotLineRe.FindStringSubmatch(line)
+	if m == nil {
+		return Event{}, false
+	}
+	// Only a completed mailbox save counts as a delivery.
+	save := dovecotSaveRe.FindStringSubmatch(line)
+	if save == nil {
+		return Event{}, false
+	}
+	tsRaw, who := m[1], m[3]
+
+	ev := Event{
+		Daemon:   "dovecot",
+		Status:   StatusSent,
+		Relay:    "dovecot",
+		Response: "saved mail to " + strings.TrimSpace(save[1]),
+		RawLine:  line,
+		TimeRaw:  tsRaw,
+	}
+	// Recipient: the address inside lda(...)/lmtp(...). LDA puts it directly; LMTP
+	// may include a PID first, so take the first email-looking token in the group.
+	if addr := emailInTextRe.FindString(who); addr != "" {
+		ev.To = strings.ToLower(addr)
+	}
+	if mid := dovecotMsgIDRe.FindStringSubmatch(line); mid != nil {
+		ev.MessageID = strings.ToLower(strings.Trim(mid[1], "<>"))
+	}
+	if t, ok := parseTimestamp(tsRaw, year); ok {
+		ev.Time = t
+	}
+	return ev, true
+}
+
 // Parse reads Postfix log lines from r. year is used to complete the
 // year-less syslog timestamp (pass the year the log covers; 0 uses 2026 as a
 // neutral default for deterministic tests).
@@ -130,6 +186,10 @@ func Parse(r io.Reader, year int) Log {
 		}
 		m := lineRe.FindStringSubmatch(line)
 		if m == nil {
+			// WO-34: not a postfix line — try Dovecot LDA/LMTP local delivery.
+			if ev, ok := parseDovecotLine(line, year); ok {
+				l.Events = append(l.Events, ev)
+			}
 			continue
 		}
 		tsRaw, daemon, qid, rest := m[1], m[2], m[3], m[4]

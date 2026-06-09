@@ -330,3 +330,19 @@ func TestNotFoundNoTraceHasNoNote(t *testing.T) {
 		t.Fatalf("a message with no trace must be bare not_found, got outcome=%s note=%q", rr.Outcome, rr.Note)
 	}
 }
+
+// WO-34: an internal message delivered by Dovecot (Postfix mailbox_command=dovecot-lda)
+// resolves to delivered_local, not not_found.
+func TestDovecotInternalDeliveryIsDeliveredLocal(t *testing.T) {
+	log := parseLog(t, `2026-06-09T09:28:51+02:00 mail KLMS: not processed: message-id="<dv-1@acme.test>": rcpt-to="auser@acme.test"
+2026-06-09T09:28:52+02:00 mail dovecot: lda(auser@acme.test): msgid=<dv-1@acme.test>: saved mail to INBOX
+`)
+	res := Analyze(eml.Email{MessageID: "dv-1@acme.test", To: []string{"auser@acme.test"}}, log)
+	rr := find(res, "auser@acme.test")
+	if rr.Outcome != DeliveredLocal {
+		t.Fatalf("dovecot internal delivery must be delivered_local, got %s", rr.Outcome)
+	}
+	if strings.Contains(res.Caveat, "accepted the message (SMTP 2xx)") {
+		t.Fatalf("dovecot local delivery must not affirm SMTP 2xx, got: %s", res.Caveat)
+	}
+}

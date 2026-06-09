@@ -103,3 +103,36 @@ func TestParseMixedTimestampFormats(t *testing.T) {
 		t.Fatalf("mixed-format log should yield 5 events, got %d", len(l.Events))
 	}
 }
+
+// WO-34: Dovecot LDA/LMTP local mailbox deliveries (the common Postfix+Dovecot
+// internal-delivery path) are parsed as delivery events.
+func TestParseDovecotLDADelivery(t *testing.T) {
+	const log = `2026-06-09T09:28:52+02:00 mail dovecot: lda(auser@acme.test): msgid=<dv-1@acme.test>: saved mail to INBOX
+`
+	l := Parse(strings.NewReader(log), 2026)
+	if len(l.Events) != 1 {
+		t.Fatalf("dovecot lda save should yield 1 event, got %d", len(l.Events))
+	}
+	e := l.Events[0]
+	if e.Daemon != "dovecot" || e.Status != StatusSent || e.To != "auser@acme.test" || e.MessageID != "dv-1@acme.test" {
+		t.Fatalf("dovecot event fields wrong: %+v", e)
+	}
+}
+
+func TestParseDovecotLMTPDelivery(t *testing.T) {
+	const log = `2026-06-09T10:00:00+02:00 mail dovecot: lmtp(4242, auser@acme.test): msgid=<dv-2@acme.test>: saved mail to INBOX/Maildir
+`
+	l := Parse(strings.NewReader(log), 2026)
+	if len(l.Events) != 1 || l.Events[0].To != "auser@acme.test" || l.Events[0].MessageID != "dv-2@acme.test" {
+		t.Fatalf("dovecot lmtp parse wrong: %+v", l.Events)
+	}
+}
+
+func TestDovecotNonSaveLineIsNotDelivery(t *testing.T) {
+	// A dovecot line without "saved mail to" (e.g. an error/info line) is not a delivery.
+	const log = `2026-06-09T10:00:00+02:00 mail dovecot: lda(x@p.com): sieve: msgid=<e1@p.com>: marked message to be discarded
+`
+	if l := Parse(strings.NewReader(log), 2026); len(l.Events) != 0 {
+		t.Fatalf("non-save dovecot line must not be a delivery, got %+v", l.Events)
+	}
+}
