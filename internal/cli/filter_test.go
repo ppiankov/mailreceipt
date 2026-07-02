@@ -48,6 +48,10 @@ const filterQPAngleRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3020]:
 Jun 15 09:00:01 mail01 postfix/smtp[3021]: ABCD20: to=<john@example.test>, relay=mx.example.test[203.0.113.15]:25, status=sent (250 OK qp angle)
 `
 
+const filterMidSoftWrapRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3030]: ABCD30: message-id=<mid-softwrap@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3031]: ABCD30: to=<a@obwb.test>, relay=mx.obwb.test[203.0.113.18]:25, status=sent (250 OK mid)
+`
+
 const filterConfig = `log_year: 2026
 receipt_filter:
   domains: [acme.test]
@@ -391,6 +395,33 @@ func TestFilterOutlookMailtoDoubledRecipientsAreDelivered(t *testing.T) {
 	}
 	if got := strings.Count(decodedJSON, `"outcome": "delivered_remote"`); got != 3 {
 		t.Fatalf("all recovered recipients should be delivered_remote, got %d:\n%s", got, decodedJSON)
+	}
+}
+
+// WO-37: a mid-address QP soft break must be rejoined so the recipient still
+// resolves against the delivery log instead of being dropped.
+func TestFilterRecoversMidSoftWrappedRecipient(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: a@ob=\r\nwb.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 15 Jun 2026 09:00:00 +0000\r\n" +
+		"Message-ID: <mid-softwrap@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterMidSoftWrapRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "a@obwb.test"`) {
+		t.Fatalf("filter JSON missing rejoined recipient:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("rejoined recipient should match the delivery log, got:\n%s", decodedJSON)
 	}
 }
 

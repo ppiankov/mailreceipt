@@ -52,6 +52,28 @@ func TestParseOutlookMailtoDoubledSoftWrappedRecipients(t *testing.T) {
 	}
 }
 
+// WO-37: a QP soft break can land mid-address with no following whitespace; the
+// repair must rejoin the token instead of dropping the recipient. The
+// whitespace-required form missed this and returned zero recipients.
+func TestParseMidAddressSoftWrappedRecipient(t *testing.T) {
+	raw := "From: Sender <sender@example.test>\r\n" +
+		"To: a@ob=\r\nwb.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 5 Jun 2026 15:09:00 +0000\r\n" +
+		"Message-ID: <mid-softwrap@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"a@obwb.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
 // WO-37: Outlook frequently uses semicolons where RFC5322 expects commas.
 func TestParseSemicolonSeparatedRecipients(t *testing.T) {
 	raw := `From: Sender <sender@example.test>

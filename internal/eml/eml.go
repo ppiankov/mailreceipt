@@ -42,7 +42,7 @@ var lenientDateLayouts = []string{
 var subjectWordDecoder = &mime.WordDecoder{CharsetReader: subjectCharsetReader}
 
 var (
-	headerSoftBreakRe           = regexp.MustCompile(`=\r?\n[ \t]+`)
+	headerSoftBreakRe           = regexp.MustCompile(`([^?])=\r?\n`)
 	qpAddressEscapeRe           = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E|40)`)
 	qpAddressStructuralEscapeRe = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E)`)
 	addrSpecRe                  = regexp.MustCompile(`[A-Za-z0-9.!#$%&*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+`)
@@ -235,9 +235,18 @@ func normalizeMessageID(s string) string {
 }
 
 // WO-37: Outlook-style forwards sometimes put quoted-printable soft breaks in
-// address headers. They are line-wrapping artifacts, not address bytes.
+// address headers. They are line-wrapping artifacts, not address bytes. The
+// pattern removes a QP soft break (a "=" immediately before the newline) without
+// requiring trailing whitespace, so a break that lands mid-address
+// (a@ob=\r\nwb.test) with the continuation flush against the newline is rejoined
+// instead of dropping the recipient. A real RFC5322 fold has no "=" before the
+// CRLF and is never matched. Critically, the "=" must NOT be preceded by "?": an
+// RFC2047 encoded word ends in "?=", so a header value ending in an encoded word
+// has "?=\r\n" that is a terminator, not a soft break — eating it would weld the
+// next header onto the subject and destroy the encoded word. The [^?] guard
+// (kept via $1) excludes exactly that case.
 func repairHeaderSoftBreaks(raw []byte) []byte {
-	return headerSoftBreakRe.ReplaceAll(raw, nil)
+	return headerSoftBreakRe.ReplaceAll(raw, []byte("$1"))
 }
 
 // WO-37: recover malformed Outlook address headers before falling back to token
