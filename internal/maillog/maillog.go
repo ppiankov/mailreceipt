@@ -72,6 +72,28 @@ func (l Log) SawMessageID(mid string) bool {
 	return ok
 }
 
+// TimeRange returns the earliest and latest parsed delivery-event timestamps.
+// WO-38: receipts and doctor output need the searched evidence range so a
+// not_found result is bounded by what the log actually covered.
+func (l Log) TimeRange() (time.Time, time.Time, bool) {
+	var first, last time.Time
+	for _, ev := range l.Events {
+		if ev.Time.IsZero() {
+			continue
+		}
+		if first.IsZero() || ev.Time.Before(first) {
+			first = ev.Time
+		}
+		if last.IsZero() || ev.Time.After(last) {
+			last = ev.Time
+		}
+	}
+	if first.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	return first, last, true
+}
+
 var (
 	// The leading syslog timestamp + host + "postfix/<daemon>[pid]: <queue>: rest"
 	// We capture the timestamp, the queue id, and the remainder. The timestamp is

@@ -78,6 +78,40 @@ func TestDiagnoseDetectsRFC3339(t *testing.T) {
 	}
 }
 
+// WO-38: doctor reports the parsed delivery timestamp range.
+func TestDiagnoseReportsLogTimeRange(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "rfc.log")
+	if err := os.WriteFile(p, []byte(rfcLog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep := diagnose(p)
+	var rangeDetail string
+	for _, c := range rep.Checks {
+		if c.Name == "log_time_range" {
+			rangeDetail = c.Detail
+		}
+	}
+	if !strings.Contains(rangeDetail, "Searched log delivery time range: 2026-06-05") {
+		t.Fatalf("doctor should report searched range, got %q", rangeDetail)
+	}
+}
+
+// WO-38: doctor uses the same gzip/glob log input path as filter.
+func TestDiagnoseReadsGzipGlob(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mail.log"), []byte("not a delivery\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeGzipFile(t, filepath.Join(dir, "mail.log.1.gz"), bsdLog)
+	rep := diagnose(filepath.Join(dir, "mail.log*"))
+	if rep.Status != "ok" {
+		t.Fatalf("gzip glob log should be ok, got %s (%+v)", rep.Status, rep.Checks)
+	}
+	if !hasPassing(rep, "log_time_range") {
+		t.Fatalf("log_time_range should pass on gzip glob, got %+v", rep.Checks)
+	}
+}
+
 func TestDoctorReportIsValidANCCJSON(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "mail.log")
 	if err := os.WriteFile(p, []byte(bsdLog), 0o644); err != nil {

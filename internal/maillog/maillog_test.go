@@ -104,6 +104,21 @@ func TestParseMixedTimestampFormats(t *testing.T) {
 	}
 }
 
+// WO-38: the parsed delivery-event range bounds not_found receipts and doctor.
+func TestLogTimeRange(t *testing.T) {
+	l := Parse(strings.NewReader(rfc3339Log), 0)
+	first, last, ok := l.TimeRange()
+	if !ok {
+		t.Fatal("time range should be present")
+	}
+	if first.Format(time.RFC3339Nano) != "2026-06-05T14:09:36.750604+02:00" {
+		t.Fatalf("first: got %s", first.Format(time.RFC3339Nano))
+	}
+	if last.Format(time.RFC3339Nano) != "2026-06-05T14:09:36.751041+02:00" {
+		t.Fatalf("last: got %s", last.Format(time.RFC3339Nano))
+	}
+}
+
 // WO-34: Dovecot LDA/LMTP local mailbox deliveries (the common Postfix+Dovecot
 // internal-delivery path) are parsed as delivery events.
 func TestParseDovecotLDADelivery(t *testing.T) {

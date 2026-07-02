@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,6 +12,8 @@ import (
 	"mime/quotedprintable"
 	"net/mail"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,27 +70,27 @@ func filterCmd() *cobra.Command {
 
 			raw, err := io.ReadAll(cmd.InOrStdin())
 			if err != nil {
-				return nil
+				return filterRefuse(cmd, "could not read trigger message: %v", err)
 			}
-			if filterLoopGuard(raw) {
-				return nil
+			if reason := filterLoopGuardReason(raw); reason != "" {
+				return filterRefuse(cmd, reason)
 			}
 			// WO-32: suppress a duplicate receipt when Postfix re-delivers the same
 			// trigger to the pipe. Keyed on the trigger Message-ID; opt-in.
 			if !claimTrigger(dedupDir, raw) {
-				return nil
+				return filterRefuse(cmd, "duplicate trigger suppressed by --dedup-dir")
 			}
 
 			// WO-23: envelope sender is the MTA-authenticated trust boundary.
 			if strings.TrimSpace(envelopeFrom) == "" {
-				return nil
+				return filterRefuse(cmd, "missing authenticated envelope sender")
 			}
 			triggerSender, ok := normalizeTrustedAddress(envelopeFrom)
 			if !ok {
-				return nil
+				return filterRefuse(cmd, "invalid authenticated envelope sender")
 			}
 			if !domainAllowed(triggerSender, cfg.ReceiptFilter.Domains) {
-				return nil
+				return filterRefuse(cmd, "envelope sender is not authorized for configured receipt domains")
 			}
 			if replyFrom == "" {
 				// WO-16: keep generated replies RFC5322-complete even without explicit config.
@@ -97,28 +100,33 @@ func filterCmd() *cobra.Command {
 				// WO-20: configured reply identity is trusted input, not a messy header.
 				replyFrom, ok = normalizeTrustedAddress(replyFrom)
 				if !ok {
-					return nil
+					return filterRefuse(cmd, "invalid receipt reply sender")
 				}
 			}
 			if !domainAllowed(replyFrom, cfg.ReceiptFilter.Domains) {
-				return nil
+				return filterRefuse(cmd, "receipt reply sender is not authorized for configured receipt domains")
 			}
 			forwarded, err := eml.ExtractForwardedEmail(raw)
-			if err != nil || len(forwarded.Email.Recipients()) == 0 {
-				return nil
+			if err != nil {
+				return filterRefuse(cmd, "could not extract forwarded message: %v", err)
+			}
+			if len(forwarded.Email.Recipients()) == 0 {
+				if forwarded.Attached {
+					return filterRefuse(cmd, "forwarded message attachment has no parsed recipients")
+				}
+				return filterRefuse(cmd, "no message/rfc822 attachment or parseable forwarded recipients found")
 			}
 			if !sharesFilterTeam(cfg.ReceiptFilter, triggerSender, forwarded.Email) {
-				return nil
+				return filterRefuse(cmd, "envelope sender is not authorized for forwarded message owner")
 			}
 			if logPath == "" {
-				return nil
+				return filterRefuse(cmd, "missing --log path")
 			}
-			lf, err := os.Open(logPath)
+			logInput, err := readLogInput(logPath)
 			if err != nil {
-				return nil
+				return filterRefuse(cmd, "could not read log input: %v", err)
 			}
-			defer lf.Close()
-			log := maillog.Parse(lf, logYear)
+			log := maillog.Parse(bytes.NewReader(logInput.Data), logYear)
 
 			e := forwarded.Email
 			if forwarded.Attached {
@@ -128,16 +136,120 @@ func filterCmd() *cobra.Command {
 			}
 			res := deliver.Analyze(e, log)
 			rec := receipt.New(res, caseRef, time.Time{})
+			annotateReceiptLogRange(&rec, log)
 			return writeFilterReply(cmd.OutOrStdout(), triggerSender, replyFrom, filterNow(), rec)
 		},
 	}
 	cmd.Flags().StringVar(&envelopeFrom, "envelope-from", "", "MTA-authenticated envelope sender for the trigger email")
 	cmd.Flags().StringVar(&replyFrom, "from", "", "From address for generated receipt replies")
-	cmd.Flags().StringVar(&logPath, "log", "", "path to the Postfix mail log")
+	cmd.Flags().StringVar(&logPath, "log", "", "path, comma-list, or glob of Postfix mail logs")
 	cmd.Flags().StringVar(&caseRef, "case", "", "case/matter reference to stamp on the receipt")
 	cmd.Flags().IntVar(&logYear, "log-year", 0, "year for the year-less syslog timestamps (default 2026)")
 	cmd.Flags().StringVar(&dedupDir, "dedup-dir", "", "directory for trigger idempotency state (suppresses duplicate receipts on pipe re-delivery)")
 	return cmd
+}
+
+type logInput struct {
+	Data  []byte
+	Paths []string
+}
+
+// WO-38: --log accepts a single path, a comma/list-separated path set, or a glob;
+// .gz rotated logs are decoded before parsing.
+func readLogInput(spec string) (logInput, error) {
+	paths, err := expandLogPaths(spec)
+	if err != nil {
+		return logInput{}, err
+	}
+	var buf bytes.Buffer
+	for _, path := range paths {
+		data, err := readLogPath(path)
+		if err != nil {
+			return logInput{}, err
+		}
+		if buf.Len() > 0 && !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+			buf.WriteByte('\n')
+		}
+		buf.Write(data)
+		if len(data) > 0 && data[len(data)-1] != '\n' {
+			buf.WriteByte('\n')
+		}
+	}
+	return logInput{Data: buf.Bytes(), Paths: paths}, nil
+}
+
+func expandLogPaths(spec string) ([]string, error) {
+	var parts []string
+	if strings.Contains(spec, ",") {
+		parts = strings.Split(spec, ",")
+	} else if split := filepath.SplitList(spec); len(split) > 1 {
+		parts = split
+	} else {
+		parts = []string{spec}
+	}
+	var paths []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.ContainsAny(part, "*?[") {
+			matches, err := filepath.Glob(part)
+			if err != nil {
+				return nil, err
+			}
+			if len(matches) == 0 {
+				return nil, fmt.Errorf("log pattern %q matched no files", part)
+			}
+			sort.Strings(matches)
+			paths = append(paths, matches...)
+			continue
+		}
+		paths = append(paths, part)
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no log paths supplied")
+	}
+	return paths, nil
+}
+
+func readLogPath(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var r io.Reader = f
+	var gz *gzip.Reader
+	if strings.HasSuffix(strings.ToLower(path), ".gz") {
+		gz, err = gzip.NewReader(f)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		r = gz
+	}
+	return io.ReadAll(r)
+}
+
+// WO-38: include the searched delivery-event range in generated receipts.
+func annotateReceiptLogRange(rec *receipt.Receipt, log maillog.Log) {
+	rec.Result.Caveat = strings.TrimSpace(rec.Result.Caveat + " " + logRangeSentence(log))
+}
+
+func logRangeSentence(log maillog.Log) string {
+	first, last, ok := log.TimeRange()
+	if !ok {
+		return "Searched log delivery time range: no parsed delivery timestamps."
+	}
+	if first.Equal(last) {
+		return "Searched log delivery time range: " + formatLogTime(first) + "."
+	}
+	return "Searched log delivery time range: " + formatLogTime(first) + " to " + formatLogTime(last) + "."
+}
+
+func formatLogTime(t time.Time) string {
+	return t.Format("2006-01-02 15:04:05 -0700")
 }
 
 // WO-16: injectable clock keeps reply Date tests deterministic.
@@ -146,16 +258,24 @@ var filterNow = time.Now
 // WO-22: injectable MIME boundary source keeps random-boundary tests deterministic.
 var filterNewBoundary = randomFilterReplyBoundary
 
-func filterLoopGuard(raw []byte) bool {
+func filterLoopGuardReason(raw []byte) string {
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
-		return true
+		return "trigger message is not parseable RFC822"
 	}
 	autoSubmitted := strings.TrimSpace(msg.Header.Get("Auto-Submitted"))
 	if autoSubmitted != "" && !strings.EqualFold(autoSubmitted, "no") {
-		return true
+		return "auto-submitted trigger suppressed"
 	}
-	return strings.EqualFold(strings.TrimSpace(msg.Header.Get("Precedence")), "bulk")
+	if strings.EqualFold(strings.TrimSpace(msg.Header.Get("Precedence")), "bulk") {
+		return "bulk trigger suppressed"
+	}
+	return ""
+}
+
+func filterRefuse(cmd *cobra.Command, format string, args ...any) error {
+	fmt.Fprintf(cmd.ErrOrStderr(), "mailreceipt filter: "+format+"\n", args...)
+	return nil
 }
 
 func sharesFilterTeam(cfg config.ReceiptFilterConfig, triggerSender string, sent eml.Email) bool {

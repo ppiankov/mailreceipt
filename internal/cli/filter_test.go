@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"io"
 	"mime"
@@ -23,6 +24,12 @@ Jun  5 15:09:21 mail01 postfix/smtp[20441]: ABCDEF2: to=<ghost@example.test>, re
 
 const filterDovecotSieveStoredLog = `Jul  2 08:12:00 mail01 postfix/cleanup[4000]: STORE1: message-id=<sieve-store@example.test>
 Jul  2 08:12:01 mail01 dovecot: lda(clerk)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: sieve: msgid=<sieve-store@example.test>: stored mail into mailbox 'INBOX'
+`
+
+const filterOutlookRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3000]: ABCD01: message-id=<outlook-delivered@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3001]: ABCD01: to=<alpha@obwb.test>, relay=mx.obwb.test[203.0.113.11]:25, status=sent (250 OK alpha)
+Jun 15 09:00:02 mail01 postfix/smtp[3001]: ABCD01: to=<beta@obwb.test>, relay=mx.obwb.test[203.0.113.12]:25, status=sent (250 OK beta)
+Jun 15 09:00:03 mail01 postfix/smtp[3001]: ABCD01: to=<gamma@example.test>, relay=mx.example.test[203.0.113.13]:25, status=sent (250 OK gamma)
 `
 
 const filterConfig = `log_year: 2026
@@ -257,6 +264,116 @@ func TestFilterUnknownAttachmentMessageIDReturnsNotFoundOnly(t *testing.T) {
 	}
 }
 
+// WO-36: accepted triggers with recipients but no matching delivery still emit a receipt.
+func TestFilterUnknownAttachmentIncludesSearchedRange(t *testing.T) {
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("missing@acme.test", "ghost@example.test")), filterConfig)
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "Outcome: NOT FOUND") {
+		t.Fatalf("missing delivery should emit a not_found receipt, got:\n%s", textBody)
+	}
+	if !strings.Contains(textBody, "Searched log delivery time range:") {
+		t.Fatalf("not_found receipt should state searched range, got:\n%s", textBody)
+	}
+}
+
+// WO-36: no attachment and no parseable forwarded recipients must be visible.
+func TestFilterNoForwardedMessageWritesAdmittedReason(t *testing.T) {
+	trigger := `From: Sender <sender@example.test>
+To: receipt@example.test
+Subject: receipt request
+
+Please receipt this.
+`
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+`
+	out, errOut := runFilterResultWithLogAndArgs(t, "sender@example.test", trigger, cfg, filterLog)
+	if out != "" {
+		t.Fatalf("unparseable trigger should not emit a reply, got:\n%s", out)
+	}
+	if !strings.Contains(errOut, "no message/rfc822 attachment or parseable forwarded recipients found") {
+		t.Fatalf("stderr should name missing forwarded message, got %q", errOut)
+	}
+}
+
+// WO-36: an attached message with no recipients is an admitted refusal, not silence.
+func TestFilterAttachmentWithNoRecipientsWritesAdmittedReason(t *testing.T) {
+	attached := `From: Sender <sender@example.test>
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <no-recipient@example.test>
+
+body
+`
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+`
+	out, errOut := runFilterResultWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(attached), cfg, filterLog)
+	if out != "" {
+		t.Fatalf("recipientless attachment should not emit a reply, got:\n%s", out)
+	}
+	if !strings.Contains(errOut, "forwarded message attachment has no parsed recipients") {
+		t.Fatalf("stderr should name zero parsed recipients, got %q", errOut)
+	}
+}
+
+// WO-37: Outlook-mangled recipients recovered from the attachment feed delivery lookup.
+func TestFilterOutlookMailtoDoubledRecipientsAreDelivered(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: 'Alpha One' < <mailto:alpha@obwb.test> alpha@obwb.test>; =\r\n" +
+		" 'Beta Two' < <mailto:beta@obwb.test> beta@obwb.test>\r\n" +
+		"Cc: Gamma <gamma@example.test>\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 15 Jun 2026 09:00:00 +0000\r\n" +
+		"Message-ID: <outlook-delivered@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterOutlookRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, want := range []string{"alpha@obwb.test", "beta@obwb.test", "gamma@example.test"} {
+		if !strings.Contains(decodedJSON, `"recipient": "`+want+`"`) {
+			t.Fatalf("filter JSON missing recovered recipient %q:\n%s", want, decodedJSON)
+		}
+	}
+	if got := strings.Count(decodedJSON, `"outcome": "delivered_remote"`); got != 3 {
+		t.Fatalf("all recovered recipients should be delivered_remote, got %d:\n%s", got, decodedJSON)
+	}
+}
+
+// WO-38: filter can search a rotated gzip log via glob, not only current mail.log.
+func TestFilterSearchesRotatedGzipLogGlob(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("outlook-delivered@example.test", "alpha@obwb.test",
+		"From: Sender <sender@example.test>")
+	out, errOut := runFilterResultWithPreparedLog(t, "sender@example.test", triggerWithAttachment(sent), cfg, "mail.log*", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "mail.log"), []byte("Jun 20 10:00:00 mail01 postfix/qmgr[1]: idle\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeGzipFile(t, filepath.Join(dir, "mail.log.2.gz"), filterOutlookRecipientLog)
+	})
+	if errOut != "" {
+		t.Fatalf("filter should not write stderr for rotated-log success, got %q", errOut)
+	}
+	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered_remote"`) {
+		t.Fatalf("rotated gzip delivery should be found, got:\n%s", out)
+	}
+}
+
 func TestFilterInlineForwardWithoutTimeStaysNotFound(t *testing.T) {
 	inline := `From: Docketing <docketing@acme.test>
 To: receipt@acme.test
@@ -424,6 +541,21 @@ func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArg
 
 func runFilterWithLogAndArgs(t *testing.T, envelopeFrom, trigger, cfg, logBody string, extraArgs ...string) string {
 	t.Helper()
+	out, _ := runFilterResultWithLogAndArgs(t, envelopeFrom, trigger, cfg, logBody, extraArgs...)
+	return out
+}
+
+func runFilterResultWithLogAndArgs(t *testing.T, envelopeFrom, trigger, cfg, logBody string, extraArgs ...string) (string, string) {
+	t.Helper()
+	return runFilterResultWithPreparedLog(t, envelopeFrom, trigger, cfg, "mail.log", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "mail.log"), []byte(logBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, extraArgs...)
+}
+
+func runFilterResultWithPreparedLog(t *testing.T, envelopeFrom, trigger, cfg, logSpec string, prepare func(string), extraArgs ...string) (string, string) {
+	t.Helper()
 	oldNow := filterNow
 	filterNow = func() time.Time {
 		return time.Date(2026, 6, 7, 14, 2, 0, 0, time.UTC)
@@ -432,26 +564,23 @@ func runFilterWithLogAndArgs(t *testing.T, envelopeFrom, trigger, cfg, logBody s
 
 	dir := t.TempDir()
 	t.Chdir(dir)
-	logPath := filepath.Join(dir, "mail.log")
-	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(filepath.Join(dir, ".mailreceipt.yml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	prepare(dir)
 	cmd := Root()
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&stderr)
 	cmd.SetIn(strings.NewReader(trigger))
-	args := []string{"filter", "--envelope-from", envelopeFrom, "--log", logPath, "--log-year", "2026"}
+	args := []string{"filter", "--envelope-from", envelopeFrom, "--log", logSpec, "--log-year", "2026"}
 	args = append(args, extraArgs...)
 	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("filter returned error: %v stderr=%s", err, stderr.String())
 	}
-	return out.String()
+	return out.String(), stderr.String()
 }
 
 func runCheckJSONWithLog(t *testing.T, message, logBody string) string {
@@ -679,6 +808,24 @@ Message-ID: <` + messageID + `>
 
 body
 `
+}
+
+func writeGzipFile(t *testing.T, path, body string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	if _, err := gz.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // WO-32: a trigger carrying its own Message-ID, so dedup can key on it.

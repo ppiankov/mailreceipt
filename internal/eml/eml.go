@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +41,11 @@ var lenientDateLayouts = []string{
 
 var subjectWordDecoder = &mime.WordDecoder{CharsetReader: subjectCharsetReader}
 
+var (
+	headerSoftBreakRe = regexp.MustCompile(`=\r?\n[ \t]+`)
+	addrSpecRe        = regexp.MustCompile(`[A-Za-z0-9.!#$%&*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+`)
+)
+
 // Recipients returns To + Cc addresses, lowercased and de-duplicated.
 func (e Email) Recipients() []string {
 	seen := map[string]bool{}
@@ -61,6 +68,7 @@ func Parse(r io.Reader) (Email, error) {
 	if err != nil {
 		return Email{}, err
 	}
+	raw = repairHeaderSoftBreaks(raw)
 	if e, ok := parseRFC822(raw); ok {
 		return e, nil
 	}
@@ -103,30 +111,73 @@ func parseRFC822(raw []byte) (Email, bool) {
 // that are not valid RFC822.
 func parseLenient(raw []byte) Email {
 	var e Email
+	var key, value string
+	flush := func() {
+		if key == "" {
+			return
+		}
+		switch key {
+		case "message-id":
+			e.MessageID = normalizeMessageID(value)
+		case "from":
+			if e.From == "" {
+				e.From = value
+			}
+		case "sender":
+			if e.Sender == "" {
+				e.Sender = value
+			}
+		case "to":
+			if len(e.To) == 0 {
+				e.To = splitAddrs(value)
+			}
+		case "cc":
+			if len(e.Cc) == 0 {
+				e.Cc = splitAddrs(value)
+			}
+		case "subject":
+			if e.Subject == "" {
+				e.Subject = decodeSubjectHeader(value)
+			}
+		case "sent", "date":
+			if e.DateRaw == "" {
+				e.DateRaw = value
+				if t, ok := parseLenientDate(e.DateRaw); ok {
+					e.Date = t
+				}
+			}
+		}
+		key, value = "", ""
+	}
 	sc := bufio.NewScanner(strings.NewReader(string(raw)))
 	for sc.Scan() {
 		ln := sc.Text()
+		if strings.HasPrefix(ln, " ") || strings.HasPrefix(ln, "\t") {
+			if key != "" {
+				value += " " + strings.TrimSpace(ln)
+			}
+			continue
+		}
+		flush()
 		lower := strings.ToLower(ln)
 		switch {
 		case strings.HasPrefix(lower, "message-id:"):
-			e.MessageID = normalizeMessageID(after(ln, ":"))
+			key, value = "message-id", after(ln, ":")
 		case strings.HasPrefix(lower, "from:") && e.From == "":
-			e.From = after(ln, ":")
+			key, value = "from", after(ln, ":")
 		case strings.HasPrefix(lower, "sender:") && e.Sender == "":
-			e.Sender = after(ln, ":")
+			key, value = "sender", after(ln, ":")
 		case strings.HasPrefix(lower, "to:") && len(e.To) == 0:
-			e.To = splitAddrs(after(ln, ":"))
+			key, value = "to", after(ln, ":")
 		case strings.HasPrefix(lower, "cc:") && len(e.Cc) == 0:
-			e.Cc = splitAddrs(after(ln, ":"))
+			key, value = "cc", after(ln, ":")
 		case strings.HasPrefix(lower, "subject:") && e.Subject == "":
-			e.Subject = decodeSubjectHeader(after(ln, ":"))
+			key, value = "subject", after(ln, ":")
 		case (strings.HasPrefix(lower, "sent:") || strings.HasPrefix(lower, "date:")) && e.DateRaw == "":
-			e.DateRaw = after(ln, ":")
-			if t, ok := parseLenientDate(e.DateRaw); ok {
-				e.Date = t
-			}
+			key, value = strings.TrimSuffix(strings.ToLower(ln[:strings.Index(ln, ":")]), ":"), after(ln, ":")
 		}
 	}
+	flush()
 	return e
 }
 
@@ -179,33 +230,62 @@ func normalizeMessageID(s string) string {
 	return strings.ToLower(s)
 }
 
+// WO-37: Outlook-style forwards sometimes put quoted-printable soft breaks in
+// address headers. They are line-wrapping artifacts, not address bytes.
+func repairHeaderSoftBreaks(raw []byte) []byte {
+	return headerSoftBreakRe.ReplaceAll(raw, nil)
+}
+
+// WO-37: recover malformed Outlook address headers before falling back to token
+// extraction: QP-decode when possible, collapse semicolon separators, and remove
+// mailto: URL wrappers without treating them as distinct recipients.
+func normalizeAddressHeader(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(v)))
+	if err == nil && len(decoded) > 0 {
+		v = string(decoded)
+	}
+	v = strings.ReplaceAll(v, ";", ",")
+	v = strings.ReplaceAll(v, "mailto:", "")
+	v = strings.ReplaceAll(v, "MAILTO:", "")
+	v = strings.ReplaceAll(v, "< <", "<")
+	v = strings.ReplaceAll(v, "> >", ">")
+	return strings.TrimSpace(v)
+}
+
 // splitAddrs extracts bare email addresses from a header value, preferring
 // RFC822 address parsing and falling back to a token scan for messy pasted
 // values like: 'jdoe@x.test' <jdoe@x.test>
 func splitAddrs(v string) []string {
-	v = strings.TrimSpace(v)
+	v = normalizeAddressHeader(v)
 	if v == "" {
 		return nil
 	}
 	if addrs, err := mail.ParseAddressList(v); err == nil && len(addrs) > 0 {
 		out := make([]string, 0, len(addrs))
 		for _, a := range addrs {
-			out = append(out, strings.ToLower(a.Address))
+			addr := strings.ToLower(strings.TrimSpace(a.Address))
+			if addrSpecRe.FindString(addr) != addr {
+				out = nil
+				break
+			}
+			out = append(out, addr)
 		}
-		return out
+		if len(out) > 0 {
+			return out
+		}
 	}
 	// Fallback: pull anything that looks like an address out of the string.
 	var out []string
 	seen := map[string]bool{}
-	for _, tok := range strings.FieldsFunc(v, func(r rune) bool {
-		return r == ' ' || r == ',' || r == ';' || r == '<' || r == '>' || r == '\'' || r == '"'
-	}) {
-		if strings.Contains(tok, "@") {
-			t := strings.ToLower(tok)
-			if !seen[t] {
-				seen[t] = true
-				out = append(out, t)
-			}
+	for _, match := range addrSpecRe.FindAllString(v, -1) {
+		t := strings.ToLower(strings.TrimSpace(match))
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
 		}
 	}
 	return out

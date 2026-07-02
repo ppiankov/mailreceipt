@@ -29,6 +29,72 @@ body here
 	}
 }
 
+// WO-37: Outlook forwards can QP-soft-wrap address headers and duplicate each
+// recipient as both a mailto URL and a bare addr-spec.
+func TestParseOutlookMailtoDoubledSoftWrappedRecipients(t *testing.T) {
+	raw := "From: Sender <sender@example.test>\r\n" +
+		"To: 'Alpha One' < <mailto:alpha@obwb.test> alpha@obwb.test>; =\r\n" +
+		" 'Beta Two' < <mailto:beta@obwb.test> beta@obwb.test>\r\n" +
+		"Cc: 'Gamma Three' < <mailto:gamma@example.test> gamma@example.test>\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 5 Jun 2026 15:09:00 +0000\r\n" +
+		"Message-ID: <outlook-qp@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"alpha@obwb.test", "beta@obwb.test", "gamma@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: Outlook frequently uses semicolons where RFC5322 expects commas.
+func TestParseSemicolonSeparatedRecipients(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: First <first@example.test>; Second <second@example.test>, third@example.test
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <semicolon@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"first@example.test", "second@example.test", "third@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: lenient pasted blocks need the same folded-header recovery as RFC822.
+func TestParseLenientFoldedOutlookRecipients(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+Sent: Friday, June 5, 2026 3:09 PM
+To: 'Alpha One' < <mailto:alpha@obwb.test> alpha@obwb.test>; =
+  'Beta Two' < <mailto:beta@obwb.test> beta@obwb.test>
+Cc: Gamma <gamma@example.test>; Delta <delta@example.test>
+Subject: Filing
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"alpha@obwb.test", "beta@obwb.test", "gamma@example.test", "delta@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
 // WO-25: receipt subjects should be readable even when the original mail uses MIME encoded-words.
 func TestParseRFC2047Subjects(t *testing.T) {
 	tests := []struct {
