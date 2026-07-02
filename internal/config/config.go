@@ -88,7 +88,11 @@ func Load(cfgPath string) (Config, bool, error) {
 				if _, ok := c.ReceiptFilter.Teams[currentTeam]; !ok {
 					c.ReceiptFilter.Teams[currentTeam] = nil
 				}
-			case inTeams && indent == 6 && key == "members" && currentTeam != "":
+			// WO-39: accept "member" (singular) as an alias of "members". The
+			// singular is an easy, natural typo; recognizing only the plural
+			// silently emptied the team, so a sender listed under "member:" was
+			// refused a receipt with no diagnostic.
+			case inTeams && indent == 6 && (key == "members" || key == "member") && currentTeam != "":
 				ensureTeams(&c)
 				c.ReceiptFilter.Teams[currentTeam] = parseList(val)
 			}

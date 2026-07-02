@@ -98,3 +98,31 @@ receipt_filter:
 		t.Fatalf("members should normalize case, got %v", members)
 	}
 }
+
+// WO-39: the singular "member:" key is a natural typo that previously emptied
+// the team silently; it must populate the team identically to "members:".
+func TestLoadReceiptFilterTeamAcceptsSingularMemberKey(t *testing.T) {
+	p := filepath.Join(t.TempDir(), FileName)
+	body := `receipt_filter:
+  domains: [example.test]
+  teams:
+    plural:
+      members: [a@example.test, b@example.test]
+    singular:
+      member: [c@example.test, d@example.test]
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, _, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.ReceiptFilter.Teams["singular"]; len(got) != 2 ||
+		got[0] != "c@example.test" || got[1] != "d@example.test" {
+		t.Fatalf("singular member: key should populate the team, got %v", got)
+	}
+	if got := c.ReceiptFilter.Teams["plural"]; len(got) != 2 {
+		t.Fatalf("plural members: key must still work, got %v", got)
+	}
+}
