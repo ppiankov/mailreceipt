@@ -94,6 +94,48 @@ body
 	}
 }
 
+// WO-37: fallback must not scan a QP-corrupted copy when raw tokens are valid.
+func TestParseFallbackPreservesEqualsHexLocalPart(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: Case <case=40example@example.test> trailing text
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <equals-hex-fallback@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"case=40example@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: QP-encoded angle brackets must decode before regex fallback runs.
+func TestParseQuotedPrintableAngleRecipient(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: =3Cjohn@example.test=3E
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <qp-angle@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"john@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
 // WO-37: lenient pasted blocks need the same folded-header recovery as RFC822.
 func TestParseLenientFoldedOutlookRecipients(t *testing.T) {
 	raw := `From: Sender <sender@example.test>

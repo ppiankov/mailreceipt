@@ -36,6 +36,10 @@ const filterEqualsHexRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3010
 Jun 15 09:00:01 mail01 postfix/smtp[3011]: ABCD10: to=<case=40example@example.test>, relay=mx.example.test[203.0.113.14]:25, status=sent (250 OK equals)
 `
 
+const filterQPAngleRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3020]: ABCD20: message-id=<qp-angle@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3021]: ABCD20: to=<john@example.test>, relay=mx.example.test[203.0.113.15]:25, status=sent (250 OK qp angle)
+`
+
 const filterConfig = `log_year: 2026
 receipt_filter:
   domains: [acme.test]
@@ -403,6 +407,31 @@ func TestFilterPreservesEqualsHexRecipientLocalPart(t *testing.T) {
 	}
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
 		t.Fatalf("preserved recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: QP-decoded angle delimiters must feed delivery lookup before fallback.
+func TestFilterQuotedPrintableAngleRecipientIsDelivered(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("qp-angle@example.test", "=3Cjohn@example.test=3E",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterQPAngleRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "john@example.test"`) {
+		t.Fatalf("filter JSON missing decoded recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "3cjohn@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "=3cjohn@example.test"`) {
+		t.Fatalf("filter must not use regex fallback before QP decode:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("decoded recipient should match the delivery log, got:\n%s", decodedJSON)
 	}
 }
 

@@ -42,9 +42,10 @@ var lenientDateLayouts = []string{
 var subjectWordDecoder = &mime.WordDecoder{CharsetReader: subjectCharsetReader}
 
 var (
-	headerSoftBreakRe = regexp.MustCompile(`=\r?\n[ \t]+`)
-	qpAddressEscapeRe = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E|40)`)
-	addrSpecRe        = regexp.MustCompile(`[A-Za-z0-9.!#$%&*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+`)
+	headerSoftBreakRe           = regexp.MustCompile(`=\r?\n[ \t]+`)
+	qpAddressEscapeRe           = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E|40)`)
+	qpAddressStructuralEscapeRe = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E)`)
+	addrSpecRe                  = regexp.MustCompile(`[A-Za-z0-9.!#$%&*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+`)
 )
 
 // Recipients returns To + Cc addresses, lowercased and de-duplicated.
@@ -260,7 +261,11 @@ func normalizeAddressHeader(v string, decodeQP bool) string {
 }
 
 func shouldDecodeAddressHeader(v string) bool {
-	return strings.Contains(v, "=\r\n") || strings.Contains(v, "=\n") || qpAddressEscapeRe.MatchString(v)
+	return hasStructuralAddressQPEscape(v) || qpAddressEscapeRe.MatchString(v)
+}
+
+func hasStructuralAddressQPEscape(v string) bool {
+	return strings.Contains(v, "=\r\n") || strings.Contains(v, "=\n") || qpAddressStructuralEscapeRe.MatchString(v)
 }
 
 // splitAddrs extracts bare email addresses from a header value, preferring
@@ -274,18 +279,29 @@ func splitAddrs(v string) []string {
 	// WO-37: first parse without QP decoding. Valid local-parts may contain
 	// "=HH"; decoding them would manufacture a different address.
 	normalized := normalizeAddressHeader(raw, false)
-	if out := parseAddressList(normalized); len(out) > 0 {
+	if out := parseStrictAddressList(normalized); len(out) > 0 {
 		return out
 	}
 	if shouldDecodeAddressHeader(raw) {
-		if out := parseAddressList(normalizeAddressHeader(raw, true)); len(out) > 0 {
+		// WO-37: retry strict parsing after QP repair before regex fallback can
+		// misread encoded delimiters such as =3Caddr@example.test=3E.
+		decoded := normalizeAddressHeader(raw, true)
+		if out := parseStrictAddressList(decoded); len(out) > 0 {
+			return out
+		}
+		if !hasStructuralAddressQPEscape(raw) {
+			if out := scanAddressTokens(normalized); len(out) > 0 {
+				return out
+			}
+		}
+		if out := scanAddressTokens(decoded); len(out) > 0 {
 			return out
 		}
 	}
-	return nil
+	return scanAddressTokens(normalized)
 }
 
-func parseAddressList(v string) []string {
+func parseStrictAddressList(v string) []string {
 	if v == "" {
 		return nil
 	}
@@ -302,6 +318,13 @@ func parseAddressList(v string) []string {
 		if len(out) > 0 {
 			return out
 		}
+	}
+	return nil
+}
+
+func scanAddressTokens(v string) []string {
+	if v == "" {
+		return nil
 	}
 	// Fallback: pull anything that looks like an address out of the string.
 	var out []string
