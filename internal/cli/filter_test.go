@@ -40,6 +40,10 @@ const filterStructuralEqualsRecipientLog = `Jun 15 09:00:00 mail01 postfix/clean
 Jun 15 09:00:01 mail01 postfix/smtp[3016]: ABCD15: to=<case=3dexample@example.test>, relay=mx.example.test[203.0.113.16]:25, status=sent (250 OK structural equals)
 `
 
+const filterPrefixEqualsRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3016]: ABCD16: message-id=<prefix-equals@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3017]: ABCD16: to=<=3dcase@example.test>, relay=mx.example.test[203.0.113.17]:25, status=sent (250 OK prefix equals)
+`
+
 const filterQPAngleRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3020]: ABCD20: message-id=<qp-angle@example.test>
 Jun 15 09:00:01 mail01 postfix/smtp[3021]: ABCD20: to=<john@example.test>, relay=mx.example.test[203.0.113.15]:25, status=sent (250 OK qp angle)
 `
@@ -436,6 +440,31 @@ func TestFilterPreservesStructuralEqualsHexRecipientLocalPart(t *testing.T) {
 	}
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
 		t.Fatalf("preserved structural-looking recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: prefix =HH local-part bytes must survive parser fallback and log lookup.
+func TestFilterPreservesPrefixEqualsHexRecipientLocalPart(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("prefix-equals@example.test", "<=3dcase@example.test> trailing text",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterPrefixEqualsRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "=3dcase@example.test"`) {
+		t.Fatalf("filter JSON missing preserved prefix recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "=case@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "case@example.test"`) {
+		t.Fatalf("filter must not decode or suffix-match prefix raw recipient:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("preserved prefix recipient should match the delivery log, got:\n%s", decodedJSON)
 	}
 }
 

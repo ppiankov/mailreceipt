@@ -331,7 +331,7 @@ func scanAddressTokens(v string) []string {
 	seen := map[string]bool{}
 	for _, loc := range addrSpecRe.FindAllStringIndex(v, -1) {
 		match := v[loc[0]:loc[1]]
-		if startsWithStructuralAddressQPEscape(match) {
+		if isEncodedAddressDelimiterArtifact(v, loc[0], loc[1]) {
 			continue
 		}
 		t := strings.ToLower(strings.TrimSpace(match))
@@ -343,11 +343,29 @@ func scanAddressTokens(v string) []string {
 	return out
 }
 
+// WO-37: skip the raw token only when it is visibly the left half of an encoded
+// angle-delimiter pair, not just because a valid local-part begins with =HH.
+func isEncodedAddressDelimiterArtifact(v string, start, end int) bool {
+	if start < 0 || end > len(v) || start >= end {
+		return false
+	}
+	if start > 0 && v[start-1] == '<' {
+		return false
+	}
+	if !startsWithStructuralAddressQPEscape(v[start:end]) {
+		return false
+	}
+	if len(v[end:]) < qpEscapeLength {
+		return false
+	}
+	return strings.EqualFold(v[end:end+qpEscapeLength], "=3e")
+}
+
 func startsWithStructuralAddressQPEscape(v string) bool {
 	if len(v) < qpEscapeLength || v[0] != '=' {
 		return false
 	}
-	return qpAddressStructuralEscapeRe.MatchString(v[:qpEscapeLength])
+	return strings.EqualFold(v[:qpEscapeLength], "=3c")
 }
 
 func after(s, sep string) string {

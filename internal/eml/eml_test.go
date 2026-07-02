@@ -127,6 +127,40 @@ body
 	}
 }
 
+// WO-37: valid local-parts may begin with =HH bytes; prefix QP-looking bytes
+// must not be treated as encoded delimiters when they are literal addr-spec text.
+func TestParseFallbackPreservesEqualsHexPrefixLocalPart(t *testing.T) {
+	tests := []struct {
+		name      string
+		recipient string
+	}{
+		{name: "equals", recipient: "=3dcase@example.test"},
+		{name: "space", recipient: "=20case@example.test"},
+		{name: "left angle", recipient: "=3ccase@example.test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `From: Sender <sender@example.test>
+To: <` + tt.recipient + `> trailing text
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <equals-hex-prefix@example.test>
+
+body
+`
+			e, err := Parse(strings.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := e.Recipients()
+			want := []string{tt.recipient}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("recipients: want %v, got %v", want, got)
+			}
+		})
+	}
+}
+
 // WO-37: QP-encoded angle brackets must decode before regex fallback runs.
 func TestParseQuotedPrintableAngleRecipient(t *testing.T) {
 	raw := `From: Sender <sender@example.test>
