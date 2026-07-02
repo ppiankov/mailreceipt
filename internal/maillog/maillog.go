@@ -56,8 +56,11 @@ type Event struct {
 // recovered from cleanup lines (so events that lack an inline message-id can
 // still be linked).
 type Log struct {
-	Events     []Event
-	queueToMsg map[string]string
+	Events           []Event
+	queueToMsg       map[string]string
+	coverageFirst    time.Time // WO-38: earliest timestamp seen in any decoded log line.
+	coverageLast     time.Time // WO-38: latest timestamp seen in any decoded log line.
+	coverageFirstRaw string    // WO-38: raw timestamp form used for doctor timestamp diagnostics.
 	// seenMsgIDs records every message-id observed in ANY log line (postfix delivery
 	// lines AND non-delivery lines such as antivirus/scanner records), lowercased.
 	// WO-33: lets a not_found distinguish "no trace at all" from "seen in the log but
@@ -94,12 +97,42 @@ func (l Log) TimeRange() (time.Time, time.Time, bool) {
 	return first, last, true
 }
 
+// CoverageRange returns the earliest and latest timestamps seen in any decoded log line.
+func (l Log) CoverageRange() (time.Time, time.Time, bool) {
+	if l.coverageFirst.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	return l.coverageFirst, l.coverageLast, true
+}
+
+// CoverageTimeRaw returns the raw timestamp text for the earliest covered log line.
+func (l Log) CoverageTimeRaw() (string, bool) {
+	if l.coverageFirstRaw == "" {
+		return "", false
+	}
+	return l.coverageFirstRaw, true
+}
+
+func (l *Log) recordCoverage(tsRaw string, t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	if l.coverageFirst.IsZero() || t.Before(l.coverageFirst) {
+		l.coverageFirst = t
+		l.coverageFirstRaw = tsRaw
+	}
+	if l.coverageLast.IsZero() || t.After(l.coverageLast) {
+		l.coverageLast = t
+	}
+}
+
 var (
 	// The leading syslog timestamp + host + "postfix/<daemon>[pid]: <queue>: rest"
 	// We capture the timestamp, the queue id, and the remainder. The timestamp is
 	// either the traditional BSD form ("Jun  5 14:09:36") or the RFC3339/ISO-8601
 	// form modern rsyslog emits by default ("2026-06-05T14:09:36.750604+02:00").
-	lineRe = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/(?P<daemon>\w+)\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
+	lineRe      = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/(?P<daemon>\w+)\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
+	timestampRe = regexp.MustCompile(`^(\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+`)
 
 	messageIDRe = regexp.MustCompile(`message-id=<?([^>\s,]+)>?`)
 	// anyMessageIDRe matches message-id on ANY line, including non-postfix scanner
@@ -150,6 +183,15 @@ func parseTimestamp(tsRaw string, year int) (time.Time, bool) {
 		return t, true
 	}
 	return time.Time{}, false
+}
+
+func parseLineTimestamp(line string, year int) (string, time.Time, bool) {
+	m := timestampRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", time.Time{}, false
+	}
+	t, ok := parseTimestamp(m[1], year)
+	return m[1], t, ok
 }
 
 // parseDovecotLine recognizes a Dovecot LDA/LMTP local mailbox delivery, e.g.:
@@ -216,6 +258,9 @@ func Parse(r io.Reader, year int) Log {
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
+		if tsRaw, t, ok := parseLineTimestamp(line, year); ok {
+			l.recordCoverage(tsRaw, t)
+		}
 		// WO-33: record every message-id seen on ANY line (incl. non-postfix scanner
 		// lines) before filtering to postfix delivery lines.
 		if mid := anyMessageIDRe.FindStringSubmatch(line); mid != nil {

@@ -32,6 +32,10 @@ Jun 15 09:00:02 mail01 postfix/smtp[3001]: ABCD01: to=<beta@obwb.test>, relay=mx
 Jun 15 09:00:03 mail01 postfix/smtp[3001]: ABCD01: to=<gamma@example.test>, relay=mx.example.test[203.0.113.13]:25, status=sent (250 OK gamma)
 `
 
+const filterEqualsHexRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3010]: ABCD10: message-id=<equals-hex@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3011]: ABCD10: to=<case=40example@example.test>, relay=mx.example.test[203.0.113.14]:25, status=sent (250 OK equals)
+`
+
 const filterConfig = `log_year: 2026
 receipt_filter:
   domains: [acme.test]
@@ -271,8 +275,37 @@ func TestFilterUnknownAttachmentIncludesSearchedRange(t *testing.T) {
 	if !strings.Contains(textBody, "Outcome: NOT FOUND") {
 		t.Fatalf("missing delivery should emit a not_found receipt, got:\n%s", textBody)
 	}
-	if !strings.Contains(textBody, "Searched log delivery time range:") {
+	if !strings.Contains(textBody, "Searched log time range:") {
 		t.Fatalf("not_found receipt should state searched range, got:\n%s", textBody)
+	}
+}
+
+func TestFilterUnknownAttachmentIncludesFullSearchedCoverage(t *testing.T) {
+	const coverageLog = `2026-06-01T10:00:00+02:00 mail KLMS: clean: message-id="<coverage-start@example.test>": action="Skipped"
+2026-06-05T15:09:02+02:00 mail postfix/cleanup[20420]: ABCDEF1: message-id=<sent-1@acme.test>
+2026-06-05T15:09:20+02:00 mail postfix/smtp[20440]: ABCDEF1: to=<client@example.test>, relay=mx.example.test[203.0.113.25]:25, status=sent (250 OK)
+2026-06-20T18:30:00+02:00 mail postfix/qmgr[20499]: idle
+`
+	out := runFilterWithLogAndArgs(t, "docketing@acme.test",
+		triggerWithAttachment(sentMail("missing@acme.test", "ghost@example.test")), filterConfig, coverageLog)
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "Searched log time range: 2026-06-01 10:00:00 +0200 to 2026-06-20 18:30:00 +0200.") {
+		t.Fatalf("not_found receipt should report full searched coverage, got:\n%s", textBody)
+	}
+}
+
+func TestFilterUnknownAttachmentReportsCoverageWithoutDeliveryLines(t *testing.T) {
+	const scannerOnlyLog = `2026-06-01T10:00:00+02:00 mail KLMS: clean: message-id="<scanner-only@example.test>": action="Skipped"
+2026-06-01T10:30:00+02:00 mail postfix/qmgr[20499]: idle
+`
+	out := runFilterWithLogAndArgs(t, "docketing@acme.test",
+		triggerWithAttachment(sentMail("missing@acme.test", "ghost@example.test")), filterConfig, scannerOnlyLog)
+	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "not_found"`) {
+		t.Fatalf("scanner-only log should still produce a not_found receipt, got:\n%s", out)
+	}
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "Searched log time range: 2026-06-01 10:00:00 +0200 to 2026-06-01 10:30:00 +0200.") {
+		t.Fatalf("not_found receipt should report timestamp coverage without delivery events, got:\n%s", textBody)
 	}
 }
 
@@ -346,6 +379,30 @@ func TestFilterOutlookMailtoDoubledRecipientsAreDelivered(t *testing.T) {
 	}
 	if got := strings.Count(decodedJSON, `"outcome": "delivered_remote"`); got != 3 {
 		t.Fatalf("all recovered recipients should be delivered_remote, got %d:\n%s", got, decodedJSON)
+	}
+}
+
+// WO-37: quoted-printable repair must not corrupt valid =HH local-part bytes.
+func TestFilterPreservesEqualsHexRecipientLocalPart(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("equals-hex@example.test", "case=40example@example.test",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterEqualsHexRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "case=40example@example.test"`) {
+		t.Fatalf("filter JSON missing preserved recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "example@example.test"`) {
+		t.Fatalf("filter must not extract suffix recipient after QP corruption:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("preserved recipient should match the delivery log, got:\n%s", decodedJSON)
 	}
 }
 

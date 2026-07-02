@@ -43,6 +43,7 @@ var subjectWordDecoder = &mime.WordDecoder{CharsetReader: subjectCharsetReader}
 
 var (
 	headerSoftBreakRe = regexp.MustCompile(`=\r?\n[ \t]+`)
+	qpAddressEscapeRe = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E|40)`)
 	addrSpecRe        = regexp.MustCompile(`[A-Za-z0-9.!#$%&*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+`)
 )
 
@@ -237,16 +238,18 @@ func repairHeaderSoftBreaks(raw []byte) []byte {
 }
 
 // WO-37: recover malformed Outlook address headers before falling back to token
-// extraction: QP-decode when possible, collapse semicolon separators, and remove
-// mailto: URL wrappers without treating them as distinct recipients.
-func normalizeAddressHeader(v string) string {
+// extraction: collapse semicolon separators and remove mailto: URL wrappers
+// without treating them as distinct recipients.
+func normalizeAddressHeader(v string, decodeQP bool) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return ""
 	}
-	decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(v)))
-	if err == nil && len(decoded) > 0 {
-		v = string(decoded)
+	if decodeQP {
+		decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(v)))
+		if err == nil && len(decoded) > 0 {
+			v = string(decoded)
+		}
 	}
 	v = strings.ReplaceAll(v, ";", ",")
 	v = strings.ReplaceAll(v, "mailto:", "")
@@ -256,11 +259,33 @@ func normalizeAddressHeader(v string) string {
 	return strings.TrimSpace(v)
 }
 
+func shouldDecodeAddressHeader(v string) bool {
+	return strings.Contains(v, "=\r\n") || strings.Contains(v, "=\n") || qpAddressEscapeRe.MatchString(v)
+}
+
 // splitAddrs extracts bare email addresses from a header value, preferring
 // RFC822 address parsing and falling back to a token scan for messy pasted
 // values like: 'jdoe@x.test' <jdoe@x.test>
 func splitAddrs(v string) []string {
-	v = normalizeAddressHeader(v)
+	raw := strings.TrimSpace(v)
+	if raw == "" {
+		return nil
+	}
+	// WO-37: first parse without QP decoding. Valid local-parts may contain
+	// "=HH"; decoding them would manufacture a different address.
+	normalized := normalizeAddressHeader(raw, false)
+	if out := parseAddressList(normalized); len(out) > 0 {
+		return out
+	}
+	if shouldDecodeAddressHeader(raw) {
+		if out := parseAddressList(normalizeAddressHeader(raw, true)); len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func parseAddressList(v string) []string {
 	if v == "" {
 		return nil
 	}

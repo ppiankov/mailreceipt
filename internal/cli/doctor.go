@@ -117,7 +117,11 @@ func diagnose(logPath string) doctorReport {
 			"no Postfix delivery lines parsed — wrong file, or not Postfix syslog?")
 	} else {
 		rep.add("delivery_lines", "pass", fmt.Sprintf("%d delivery event(s)", n))
-		rep.add("timestamp_format", "pass", timestampFormat(log.Events[0].TimeRaw))
+	}
+	if tsRaw, ok := log.CoverageTimeRaw(); ok {
+		rep.add("timestamp_format", "pass", timestampFormat(tsRaw))
+	}
+	if _, _, ok := log.CoverageRange(); ok {
 		rep.add("log_time_range", "pass", strings.TrimSuffix(logRangeSentence(log), "."))
 	}
 

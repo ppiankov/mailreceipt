@@ -104,7 +104,7 @@ func TestParseMixedTimestampFormats(t *testing.T) {
 	}
 }
 
-// WO-38: the parsed delivery-event range bounds not_found receipts and doctor.
+// WO-38: delivery-event range remains distinct from full log coverage.
 func TestLogTimeRange(t *testing.T) {
 	l := Parse(strings.NewReader(rfc3339Log), 0)
 	first, last, ok := l.TimeRange()
@@ -116,6 +116,53 @@ func TestLogTimeRange(t *testing.T) {
 	}
 	if last.Format(time.RFC3339Nano) != "2026-06-05T14:09:36.751041+02:00" {
 		t.Fatalf("last: got %s", last.Format(time.RFC3339Nano))
+	}
+}
+
+// WO-38: searched coverage includes timestamped non-delivery lines, not just events.
+func TestLogCoverageRangeIncludesNonDeliveryLines(t *testing.T) {
+	const covered = `2026-06-05T14:00:00+02:00 mail KLMS: clean: message-id="<range@example.test>": action="Skipped"
+2026-06-05T14:10:00+02:00 mail postfix/smtp[100]: AAAAAA1: to=<range@example.test>, relay=mx.example.test[203.0.113.14]:25, status=sent (250 OK)
+2026-06-05T14:30:00+02:00 mail postfix/qmgr[101]: idle
+`
+	l := Parse(strings.NewReader(covered), 0)
+	eventFirst, eventLast, ok := l.TimeRange()
+	if !ok {
+		t.Fatal("delivery-event range should be present")
+	}
+	if eventFirst.Format(time.RFC3339) != "2026-06-05T14:10:00+02:00" || !eventFirst.Equal(eventLast) {
+		t.Fatalf("delivery-event range should only cover the smtp event, got %s to %s",
+			eventFirst.Format(time.RFC3339), eventLast.Format(time.RFC3339))
+	}
+	coverageFirst, coverageLast, ok := l.CoverageRange()
+	if !ok {
+		t.Fatal("coverage range should be present")
+	}
+	if coverageFirst.Format(time.RFC3339) != "2026-06-05T14:00:00+02:00" {
+		t.Fatalf("coverage first: got %s", coverageFirst.Format(time.RFC3339))
+	}
+	if coverageLast.Format(time.RFC3339) != "2026-06-05T14:30:00+02:00" {
+		t.Fatalf("coverage last: got %s", coverageLast.Format(time.RFC3339))
+	}
+}
+
+func TestLogCoverageRangeWithoutDeliveryEvents(t *testing.T) {
+	const covered = `2026-06-05T14:00:00+02:00 mail KLMS: clean: message-id="<scanner-only@example.test>": action="Skipped"
+2026-06-05T14:30:00+02:00 mail postfix/qmgr[101]: idle
+`
+	l := Parse(strings.NewReader(covered), 0)
+	if _, _, ok := l.TimeRange(); ok {
+		t.Fatal("delivery-event range should be absent without delivery events")
+	}
+	first, last, ok := l.CoverageRange()
+	if !ok {
+		t.Fatal("coverage range should be present from timestamped non-delivery lines")
+	}
+	if first.Format(time.RFC3339) != "2026-06-05T14:00:00+02:00" {
+		t.Fatalf("coverage first: got %s", first.Format(time.RFC3339))
+	}
+	if last.Format(time.RFC3339) != "2026-06-05T14:30:00+02:00" {
+		t.Fatalf("coverage last: got %s", last.Format(time.RFC3339))
 	}
 }
 

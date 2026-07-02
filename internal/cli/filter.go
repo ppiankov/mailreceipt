@@ -232,20 +232,20 @@ func readLogPath(path string) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-// WO-38: include the searched delivery-event range in generated receipts.
+// WO-38: include the searched log coverage range in generated receipts.
 func annotateReceiptLogRange(rec *receipt.Receipt, log maillog.Log) {
 	rec.Result.Caveat = strings.TrimSpace(rec.Result.Caveat + " " + logRangeSentence(log))
 }
 
 func logRangeSentence(log maillog.Log) string {
-	first, last, ok := log.TimeRange()
+	first, last, ok := log.CoverageRange()
 	if !ok {
-		return "Searched log delivery time range: no parsed delivery timestamps."
+		return "Searched log time range: no parsed log timestamps."
 	}
 	if first.Equal(last) {
-		return "Searched log delivery time range: " + formatLogTime(first) + "."
+		return "Searched log time range: " + formatLogTime(first) + "."
 	}
-	return "Searched log delivery time range: " + formatLogTime(first) + " to " + formatLogTime(last) + "."
+	return "Searched log time range: " + formatLogTime(first) + " to " + formatLogTime(last) + "."
 }
 
 func formatLogTime(t time.Time) string {

@@ -73,6 +73,27 @@ body
 	}
 }
 
+// WO-37: valid local-parts may contain =HH bytes; QP repair must not rewrite them.
+func TestParsePreservesEqualsHexLocalPart(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: Case <case=40example@example.test>
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <equals-hex@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"case=40example@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
 // WO-37: lenient pasted blocks need the same folded-header recovery as RFC822.
 func TestParseLenientFoldedOutlookRecipients(t *testing.T) {
 	raw := `From: Sender <sender@example.test>
