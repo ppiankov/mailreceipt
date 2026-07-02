@@ -48,6 +48,8 @@ var (
 	addrSpecRe                  = regexp.MustCompile(`[A-Za-z0-9.!#$%&*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+`)
 )
 
+const qpEscapeLength = 3
+
 // Recipients returns To + Cc addresses, lowercased and de-duplicated.
 func (e Email) Recipients() []string {
 	seen := map[string]bool{}
@@ -289,10 +291,8 @@ func splitAddrs(v string) []string {
 		if out := parseStrictAddressList(decoded); len(out) > 0 {
 			return out
 		}
-		if !hasStructuralAddressQPEscape(raw) {
-			if out := scanAddressTokens(normalized); len(out) > 0 {
-				return out
-			}
+		if out := scanAddressTokens(normalized); len(out) > 0 {
+			return out
 		}
 		if out := scanAddressTokens(decoded); len(out) > 0 {
 			return out
@@ -329,7 +329,11 @@ func scanAddressTokens(v string) []string {
 	// Fallback: pull anything that looks like an address out of the string.
 	var out []string
 	seen := map[string]bool{}
-	for _, match := range addrSpecRe.FindAllString(v, -1) {
+	for _, loc := range addrSpecRe.FindAllStringIndex(v, -1) {
+		match := v[loc[0]:loc[1]]
+		if startsWithStructuralAddressQPEscape(match) {
+			continue
+		}
 		t := strings.ToLower(strings.TrimSpace(match))
 		if !seen[t] {
 			seen[t] = true
@@ -337,6 +341,13 @@ func scanAddressTokens(v string) []string {
 		}
 	}
 	return out
+}
+
+func startsWithStructuralAddressQPEscape(v string) bool {
+	if len(v) < qpEscapeLength || v[0] != '=' {
+		return false
+	}
+	return qpAddressStructuralEscapeRe.MatchString(v[:qpEscapeLength])
 }
 
 func after(s, sep string) string {

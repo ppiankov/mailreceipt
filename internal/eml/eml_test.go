@@ -96,22 +96,34 @@ body
 
 // WO-37: fallback must not scan a QP-corrupted copy when raw tokens are valid.
 func TestParseFallbackPreservesEqualsHexLocalPart(t *testing.T) {
-	raw := `From: Sender <sender@example.test>
-To: Case <case=40example@example.test> trailing text
+	tests := []struct {
+		name      string
+		recipient string
+	}{
+		{name: "at sign", recipient: "case=40example@example.test"},
+		{name: "equals", recipient: "case=3dexample@example.test"},
+		{name: "space", recipient: "case=20example@example.test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `From: Sender <sender@example.test>
+To: Case <` + tt.recipient + `> trailing text
 Subject: Filing
 Date: Fri, 5 Jun 2026 15:09:00 +0000
 Message-ID: <equals-hex-fallback@example.test>
 
 body
 `
-	e, err := Parse(strings.NewReader(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := e.Recipients()
-	want := []string{"case=40example@example.test"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("recipients: want %v, got %v", want, got)
+			e, err := Parse(strings.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := e.Recipients()
+			want := []string{tt.recipient}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("recipients: want %v, got %v", want, got)
+			}
+		})
 	}
 }
 

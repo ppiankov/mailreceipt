@@ -36,6 +36,10 @@ const filterEqualsHexRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3010
 Jun 15 09:00:01 mail01 postfix/smtp[3011]: ABCD10: to=<case=40example@example.test>, relay=mx.example.test[203.0.113.14]:25, status=sent (250 OK equals)
 `
 
+const filterStructuralEqualsRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3015]: ABCD15: message-id=<structural-equals@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3016]: ABCD15: to=<case=3dexample@example.test>, relay=mx.example.test[203.0.113.16]:25, status=sent (250 OK structural equals)
+`
+
 const filterQPAngleRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3020]: ABCD20: message-id=<qp-angle@example.test>
 Jun 15 09:00:01 mail01 postfix/smtp[3021]: ABCD20: to=<john@example.test>, relay=mx.example.test[203.0.113.15]:25, status=sent (250 OK qp angle)
 `
@@ -407,6 +411,31 @@ func TestFilterPreservesEqualsHexRecipientLocalPart(t *testing.T) {
 	}
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
 		t.Fatalf("preserved recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: structural-looking =HH local-part bytes remain raw fallback tokens.
+func TestFilterPreservesStructuralEqualsHexRecipientLocalPart(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("structural-equals@example.test", "Case <case=3dexample@example.test> trailing text",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterStructuralEqualsRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "case=3dexample@example.test"`) {
+		t.Fatalf("filter JSON missing preserved structural-looking recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "case=example@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "example@example.test"`) {
+		t.Fatalf("filter must not decode or suffix-match structural-looking raw recipient:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("preserved structural-looking recipient should match the delivery log, got:\n%s", decodedJSON)
 	}
 }
 
