@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Receipts now resolve for messages forwarded as an attachment from Outlook.
+  Outlook's "forward as attachment" strips the original message's `Message-ID`
+  header (keeping only its `Date`), leaving no exact key to correlate on, so every
+  recipient reported `not_found`. When a forwarded message has no `Message-ID` but
+  has a `Date`, delivery is now correlated by recipient and send-time window —
+  but only when the match is unambiguous (a single message, i.e. one Postfix
+  queue-id). If the window contains more than one message to the same recipient,
+  the result stays `not_found` rather than guess which send was meant. Messages
+  that do carry a `Message-ID` are unaffected and still use exact-ID correlation.
+
 ## [0.6.1] - 2026-07-02
 
 ### Fixed

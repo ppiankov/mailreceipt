@@ -52,6 +52,30 @@ const filterMidSoftWrapRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[30
 Jun 15 09:00:01 mail01 postfix/smtp[3031]: ABCD30: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.18]:25, status=sent (250 OK mid)
 `
 
+// WO-41: one delivery to the recipient in the window (single queue-id) — the
+// unique-match case the Outlook stripped-Message-ID fallback must resolve.
+// Queue-ids are hex ([0-9A-F]{6,}), matching real Postfix.
+const filterStrippedMsgIDUniqueLog = `Jun 19 15:49:30 mail01 postfix/smtp[5001]: AAAA1119: to=<r@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.40]:25, status=sent (250 OK unique)
+`
+
+// WO-41: two DIFFERENT messages (two distinct queue-ids) to the same recipient
+// in the window — the ambiguous case that must stay NOT_FOUND rather than guess.
+const filterStrippedMsgIDAmbiguousLog = `Jun 19 15:40:00 mail01 postfix/smtp[5010]: BBBB2219: to=<r@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.41]:25, status=sent (250 OK first)
+Jun 19 16:10:00 mail01 postfix/smtp[5011]: CCCC3319: to=<r@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.42]:25, status=sent (250 OK second)
+`
+
+// sentMailNoMessageID mimics an Outlook forward-as-attachment: the original sent
+// message keeps its Date but has NO Message-ID header (Outlook strips it).
+func sentMailNoMessageID(recipient, date string) string {
+	return `From: Sender <sender@example.test>
+To: ` + recipient + `
+Subject: Filing
+Date: ` + date + `
+
+body
+`
+}
+
 const filterConfig = `log_year: 2026
 receipt_filter:
   domains: [acme.test]
@@ -422,6 +446,51 @@ func TestFilterRecoversMidSoftWrappedRecipient(t *testing.T) {
 	}
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
 		t.Fatalf("rejoined recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-41: Outlook forward-as-attachment strips the original Message-ID. With no
+// Message-ID but a Date, a UNIQUE recipient+window match must still resolve.
+func TestFilterStrippedMessageIDUniqueWindowMatchResolves(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailNoMessageID("r@clientfirm.test", "Fri, 19 Jun 2026 15:49:35 +0000")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterStrippedMsgIDUniqueLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "r@clientfirm.test"`) {
+		t.Fatalf("filter JSON missing recipient:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("unique window match should resolve to delivered_remote:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"match_method": "recipient_window"`) {
+		t.Fatalf("expected recipient_window match method:\n%s", decodedJSON)
+	}
+}
+
+// WO-41: when the window catches TWO different messages (two queue-ids) to the
+// same recipient, attribution is ambiguous and must stay NOT_FOUND, not guess.
+func TestFilterStrippedMessageIDAmbiguousWindowStaysNotFound(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailNoMessageID("r@clientfirm.test", "Fri, 19 Jun 2026 15:49:35 +0000")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterStrippedMsgIDAmbiguousLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"outcome": "not_found"`) {
+		t.Fatalf("ambiguous window (two queue-ids) must stay not_found, got:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("must not attribute a delivery on an ambiguous window match:\n%s", decodedJSON)
 	}
 }
 
