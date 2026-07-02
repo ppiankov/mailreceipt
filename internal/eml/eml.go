@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +41,15 @@ var lenientDateLayouts = []string{
 
 var subjectWordDecoder = &mime.WordDecoder{CharsetReader: subjectCharsetReader}
 
+var (
+	headerSoftBreakRe           = regexp.MustCompile(`([^?])=\r?\n`)
+	qpAddressEscapeRe           = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E|40)`)
+	qpAddressStructuralEscapeRe = regexp.MustCompile(`(?i)=(0D|0A|09|20|22|27|2C|3B|3C|3D|3E)`)
+	addrSpecRe                  = regexp.MustCompile(`[A-Za-z0-9.!#$%&*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+`)
+)
+
+const qpEscapeLength = 3
+
 // Recipients returns To + Cc addresses, lowercased and de-duplicated.
 func (e Email) Recipients() []string {
 	seen := map[string]bool{}
@@ -61,6 +72,7 @@ func Parse(r io.Reader) (Email, error) {
 	if err != nil {
 		return Email{}, err
 	}
+	raw = repairHeaderSoftBreaks(raw)
 	if e, ok := parseRFC822(raw); ok {
 		return e, nil
 	}
@@ -103,30 +115,73 @@ func parseRFC822(raw []byte) (Email, bool) {
 // that are not valid RFC822.
 func parseLenient(raw []byte) Email {
 	var e Email
+	var key, value string
+	flush := func() {
+		if key == "" {
+			return
+		}
+		switch key {
+		case "message-id":
+			e.MessageID = normalizeMessageID(value)
+		case "from":
+			if e.From == "" {
+				e.From = value
+			}
+		case "sender":
+			if e.Sender == "" {
+				e.Sender = value
+			}
+		case "to":
+			if len(e.To) == 0 {
+				e.To = splitAddrs(value)
+			}
+		case "cc":
+			if len(e.Cc) == 0 {
+				e.Cc = splitAddrs(value)
+			}
+		case "subject":
+			if e.Subject == "" {
+				e.Subject = decodeSubjectHeader(value)
+			}
+		case "sent", "date":
+			if e.DateRaw == "" {
+				e.DateRaw = value
+				if t, ok := parseLenientDate(e.DateRaw); ok {
+					e.Date = t
+				}
+			}
+		}
+		key, value = "", ""
+	}
 	sc := bufio.NewScanner(strings.NewReader(string(raw)))
 	for sc.Scan() {
 		ln := sc.Text()
+		if strings.HasPrefix(ln, " ") || strings.HasPrefix(ln, "\t") {
+			if key != "" {
+				value += " " + strings.TrimSpace(ln)
+			}
+			continue
+		}
+		flush()
 		lower := strings.ToLower(ln)
 		switch {
 		case strings.HasPrefix(lower, "message-id:"):
-			e.MessageID = normalizeMessageID(after(ln, ":"))
+			key, value = "message-id", after(ln, ":")
 		case strings.HasPrefix(lower, "from:") && e.From == "":
-			e.From = after(ln, ":")
+			key, value = "from", after(ln, ":")
 		case strings.HasPrefix(lower, "sender:") && e.Sender == "":
-			e.Sender = after(ln, ":")
+			key, value = "sender", after(ln, ":")
 		case strings.HasPrefix(lower, "to:") && len(e.To) == 0:
-			e.To = splitAddrs(after(ln, ":"))
+			key, value = "to", after(ln, ":")
 		case strings.HasPrefix(lower, "cc:") && len(e.Cc) == 0:
-			e.Cc = splitAddrs(after(ln, ":"))
+			key, value = "cc", after(ln, ":")
 		case strings.HasPrefix(lower, "subject:") && e.Subject == "":
-			e.Subject = decodeSubjectHeader(after(ln, ":"))
+			key, value = "subject", after(ln, ":")
 		case (strings.HasPrefix(lower, "sent:") || strings.HasPrefix(lower, "date:")) && e.DateRaw == "":
-			e.DateRaw = after(ln, ":")
-			if t, ok := parseLenientDate(e.DateRaw); ok {
-				e.Date = t
-			}
+			key, value = strings.TrimSuffix(strings.ToLower(ln[:strings.Index(ln, ":")]), ":"), after(ln, ":")
 		}
 	}
+	flush()
 	return e
 }
 
@@ -179,36 +234,147 @@ func normalizeMessageID(s string) string {
 	return strings.ToLower(s)
 }
 
+// WO-37: Outlook-style forwards sometimes put quoted-printable soft breaks in
+// address headers. They are line-wrapping artifacts, not address bytes. The
+// pattern removes a QP soft break (a "=" immediately before the newline) without
+// requiring trailing whitespace, so a break that lands mid-address
+// (a@ob=\r\nwb.test) with the continuation flush against the newline is rejoined
+// instead of dropping the recipient. A real RFC5322 fold has no "=" before the
+// CRLF and is never matched. Critically, the "=" must NOT be preceded by "?": an
+// RFC2047 encoded word ends in "?=", so a header value ending in an encoded word
+// has "?=\r\n" that is a terminator, not a soft break — eating it would weld the
+// next header onto the subject and destroy the encoded word. The [^?] guard
+// (kept via $1) excludes exactly that case.
+func repairHeaderSoftBreaks(raw []byte) []byte {
+	return headerSoftBreakRe.ReplaceAll(raw, []byte("$1"))
+}
+
+// WO-37: recover malformed Outlook address headers before falling back to token
+// extraction: collapse semicolon separators and remove mailto: URL wrappers
+// without treating them as distinct recipients.
+func normalizeAddressHeader(v string, decodeQP bool) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if decodeQP {
+		decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(v)))
+		if err == nil && len(decoded) > 0 {
+			v = string(decoded)
+		}
+	}
+	v = strings.ReplaceAll(v, ";", ",")
+	v = strings.ReplaceAll(v, "mailto:", "")
+	v = strings.ReplaceAll(v, "MAILTO:", "")
+	v = strings.ReplaceAll(v, "< <", "<")
+	v = strings.ReplaceAll(v, "> >", ">")
+	return strings.TrimSpace(v)
+}
+
+func shouldDecodeAddressHeader(v string) bool {
+	return hasStructuralAddressQPEscape(v) || qpAddressEscapeRe.MatchString(v)
+}
+
+func hasStructuralAddressQPEscape(v string) bool {
+	return strings.Contains(v, "=\r\n") || strings.Contains(v, "=\n") || qpAddressStructuralEscapeRe.MatchString(v)
+}
+
 // splitAddrs extracts bare email addresses from a header value, preferring
 // RFC822 address parsing and falling back to a token scan for messy pasted
 // values like: 'jdoe@x.test' <jdoe@x.test>
 func splitAddrs(v string) []string {
-	v = strings.TrimSpace(v)
+	raw := strings.TrimSpace(v)
+	if raw == "" {
+		return nil
+	}
+	// WO-37: first parse without QP decoding. Valid local-parts may contain
+	// "=HH"; decoding them would manufacture a different address.
+	normalized := normalizeAddressHeader(raw, false)
+	if out := parseStrictAddressList(normalized); len(out) > 0 {
+		return out
+	}
+	if shouldDecodeAddressHeader(raw) {
+		// WO-37: retry strict parsing after QP repair before regex fallback can
+		// misread encoded delimiters such as =3Caddr@example.test=3E.
+		decoded := normalizeAddressHeader(raw, true)
+		if out := parseStrictAddressList(decoded); len(out) > 0 {
+			return out
+		}
+		if out := scanAddressTokens(normalized); len(out) > 0 {
+			return out
+		}
+		if out := scanAddressTokens(decoded); len(out) > 0 {
+			return out
+		}
+	}
+	return scanAddressTokens(normalized)
+}
+
+func parseStrictAddressList(v string) []string {
 	if v == "" {
 		return nil
 	}
 	if addrs, err := mail.ParseAddressList(v); err == nil && len(addrs) > 0 {
 		out := make([]string, 0, len(addrs))
 		for _, a := range addrs {
-			out = append(out, strings.ToLower(a.Address))
+			addr := strings.ToLower(strings.TrimSpace(a.Address))
+			if addrSpecRe.FindString(addr) != addr {
+				out = nil
+				break
+			}
+			out = append(out, addr)
 		}
-		return out
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func scanAddressTokens(v string) []string {
+	if v == "" {
+		return nil
 	}
 	// Fallback: pull anything that looks like an address out of the string.
 	var out []string
 	seen := map[string]bool{}
-	for _, tok := range strings.FieldsFunc(v, func(r rune) bool {
-		return r == ' ' || r == ',' || r == ';' || r == '<' || r == '>' || r == '\'' || r == '"'
-	}) {
-		if strings.Contains(tok, "@") {
-			t := strings.ToLower(tok)
-			if !seen[t] {
-				seen[t] = true
-				out = append(out, t)
-			}
+	for _, loc := range addrSpecRe.FindAllStringIndex(v, -1) {
+		match := v[loc[0]:loc[1]]
+		if isEncodedAddressDelimiterArtifact(v, loc[0], loc[1]) {
+			continue
+		}
+		t := strings.ToLower(strings.TrimSpace(match))
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
 		}
 	}
 	return out
+}
+
+// WO-37: skip the raw token only when it is visibly the left half of an encoded
+// angle-delimiter pair, not just because a valid local-part begins with =HH.
+func isEncodedAddressDelimiterArtifact(v string, start, end int) bool {
+	if start < 0 || end > len(v) || start >= end {
+		return false
+	}
+	if start > 0 && v[start-1] == '<' {
+		return false
+	}
+	if !startsWithStructuralAddressQPEscape(v[start:end]) {
+		return false
+	}
+	if len(v[end:]) < qpEscapeLength {
+		return false
+	}
+	return strings.EqualFold(v[end:end+qpEscapeLength], "=3e")
+}
+
+func startsWithStructuralAddressQPEscape(v string) bool {
+	if len(v) < qpEscapeLength || v[0] != '=' {
+		return false
+	}
+	return strings.EqualFold(v[:qpEscapeLength], "=3c")
 }
 
 func after(s, sep string) string {

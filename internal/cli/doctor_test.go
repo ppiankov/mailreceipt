@@ -78,6 +78,66 @@ func TestDiagnoseDetectsRFC3339(t *testing.T) {
 	}
 }
 
+// WO-38: doctor reports the searched log timestamp coverage.
+func TestDiagnoseReportsLogTimeRange(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "rfc.log")
+	if err := os.WriteFile(p, []byte(rfcLog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep := diagnose(p)
+	var rangeDetail string
+	for _, c := range rep.Checks {
+		if c.Name == "log_time_range" {
+			rangeDetail = c.Detail
+		}
+	}
+	if !strings.Contains(rangeDetail, "Searched log time range: 2026-06-05") {
+		t.Fatalf("doctor should report searched range, got %q", rangeDetail)
+	}
+}
+
+func TestDiagnoseReportsCoverageWithoutDeliveryLines(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "scanner.log")
+	body := `2026-06-05T10:00:00+02:00 mail KLMS: clean: message-id="<scanner-only@example.test>": action="Skipped"
+2026-06-05T10:30:00+02:00 mail postfix/qmgr[101]: idle
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep := diagnose(p)
+	if rep.Status != "warn" {
+		t.Fatalf("timestamped log without delivery events should warn, got %s (%+v)", rep.Status, rep.Checks)
+	}
+	if !hasPassing(rep, "log_time_range") {
+		t.Fatalf("log_time_range should pass from non-delivery timestamps, got %+v", rep.Checks)
+	}
+	var rangeDetail string
+	for _, c := range rep.Checks {
+		if c.Name == "log_time_range" {
+			rangeDetail = c.Detail
+		}
+	}
+	if !strings.Contains(rangeDetail, "2026-06-05 10:00:00 +0200 to 2026-06-05 10:30:00 +0200") {
+		t.Fatalf("doctor should report full coverage from non-delivery lines, got %q", rangeDetail)
+	}
+}
+
+// WO-38: doctor uses the same gzip/glob log input path as filter.
+func TestDiagnoseReadsGzipGlob(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mail.log"), []byte("not a delivery\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeGzipFile(t, filepath.Join(dir, "mail.log.1.gz"), bsdLog)
+	rep := diagnose(filepath.Join(dir, "mail.log*"))
+	if rep.Status != "ok" {
+		t.Fatalf("gzip glob log should be ok, got %s (%+v)", rep.Status, rep.Checks)
+	}
+	if !hasPassing(rep, "log_time_range") {
+		t.Fatalf("log_time_range should pass on gzip glob, got %+v", rep.Checks)
+	}
+}
+
 func TestDoctorReportIsValidANCCJSON(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "mail.log")
 	if err := os.WriteFile(p, []byte(bsdLog), 0o644); err != nil {

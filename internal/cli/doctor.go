@@ -1,9 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/ppiankov/mailreceipt/internal/maillog"
@@ -76,7 +76,7 @@ func doctorCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&logPath, "log", "", "path to the Postfix mail log to diagnose (required)")
+	cmd.Flags().StringVar(&logPath, "log", "", "path, comma-list, or glob of Postfix mail logs to diagnose (required)")
 	cmd.Flags().StringVar(&format, "format", "md", "output format: md | markdown | json")
 	return cmd
 }
@@ -95,36 +95,34 @@ func diagnose(logPath string) doctorReport {
 		Source:  map[string]string{"repo": repoURL},
 	}
 
-	info, err := os.Stat(logPath)
+	logInput, err := readLogInput(logPath)
 	if err != nil {
 		rep.add("log_exists", "fail", fmt.Sprintf("%s: %v", logPath, err))
 		rep.finish()
 		return rep
 	}
-	rep.add("log_exists", "pass", logPath)
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		rep.add("log_readable", "fail", err.Error())
-		rep.finish()
-		return rep
-	}
+	rep.add("log_exists", "pass", strings.Join(logInput.Paths, ", "))
 	rep.add("log_readable", "pass", "readable")
 
-	if info.Size() == 0 {
-		rep.add("log_nonempty", "fail", "the log file is empty")
+	if len(logInput.Data) == 0 {
+		rep.add("log_nonempty", "fail", "the log input is empty")
 		rep.finish()
 		return rep
 	}
-	rep.add("log_nonempty", "pass", fmt.Sprintf("%d bytes", info.Size()))
+	rep.add("log_nonempty", "pass", fmt.Sprintf("%d decoded bytes", len(logInput.Data)))
 
-	log := maillog.Parse(strings.NewReader(string(data)), 0)
+	log := maillog.Parse(bytes.NewReader(logInput.Data), 0)
 	if n := len(log.Events); n == 0 {
 		rep.add("delivery_lines", "warn",
 			"no Postfix delivery lines parsed — wrong file, or not Postfix syslog?")
 	} else {
 		rep.add("delivery_lines", "pass", fmt.Sprintf("%d delivery event(s)", n))
-		rep.add("timestamp_format", "pass", timestampFormat(log.Events[0].TimeRaw))
+	}
+	if tsRaw, ok := log.CoverageTimeRaw(); ok {
+		rep.add("timestamp_format", "pass", timestampFormat(tsRaw))
+	}
+	if _, _, ok := log.CoverageRange(); ok {
+		rep.add("log_time_range", "pass", strings.TrimSuffix(logRangeSentence(log), "."))
 	}
 
 	rep.finish()

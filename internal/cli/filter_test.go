@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"io"
 	"mime"
@@ -19,6 +20,36 @@ const filterLog = `Jun  5 15:09:02 mail01 postfix/cleanup[20420]: ABCDEF1: messa
 Jun  5 15:09:20 mail01 postfix/smtp[20440]: ABCDEF1: to=<client@example.test>, relay=mx.example.test[203.0.113.25]:25, status=sent (250 2.0.0 OK: queued as SENT1 подтверждено)
 Jun  5 15:09:03 mail01 postfix/cleanup[20421]: ABCDEF2: message-id=<unrelated@acme.test>
 Jun  5 15:09:21 mail01 postfix/smtp[20441]: ABCDEF2: to=<ghost@example.test>, relay=mx.example.test[203.0.113.25]:25, status=sent (250 2.0.0 OK: queued as UNRELATED)
+`
+
+const filterDovecotSieveStoredLog = `Jul  2 08:12:00 mail01 postfix/cleanup[4000]: STORE1: message-id=<sieve-store@example.test>
+Jul  2 08:12:01 mail01 dovecot: lda(clerk)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: sieve: msgid=<sieve-store@example.test>: stored mail into mailbox 'INBOX'
+`
+
+const filterOutlookRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3000]: ABCD01: message-id=<outlook-delivered@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3001]: ABCD01: to=<alpha@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.11]:25, status=sent (250 OK alpha)
+Jun 15 09:00:02 mail01 postfix/smtp[3001]: ABCD01: to=<beta@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.12]:25, status=sent (250 OK beta)
+Jun 15 09:00:03 mail01 postfix/smtp[3001]: ABCD01: to=<gamma@example.test>, relay=mx.example.test[203.0.113.13]:25, status=sent (250 OK gamma)
+`
+
+const filterEqualsHexRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3010]: ABCD10: message-id=<equals-hex@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3011]: ABCD10: to=<case=40example@example.test>, relay=mx.example.test[203.0.113.14]:25, status=sent (250 OK equals)
+`
+
+const filterStructuralEqualsRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3015]: ABCD15: message-id=<structural-equals@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3016]: ABCD15: to=<case=3dexample@example.test>, relay=mx.example.test[203.0.113.16]:25, status=sent (250 OK structural equals)
+`
+
+const filterPrefixEqualsRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3016]: ABCD16: message-id=<prefix-equals@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3017]: ABCD16: to=<=3dcase@example.test>, relay=mx.example.test[203.0.113.17]:25, status=sent (250 OK prefix equals)
+`
+
+const filterQPAngleRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3020]: ABCD20: message-id=<qp-angle@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3021]: ABCD20: to=<john@example.test>, relay=mx.example.test[203.0.113.15]:25, status=sent (250 OK qp angle)
+`
+
+const filterMidSoftWrapRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3030]: ABCD30: message-id=<mid-softwrap@example.test>
+Jun 15 09:00:01 mail01 postfix/smtp[3031]: ABCD30: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.18]:25, status=sent (250 OK mid)
 `
 
 const filterConfig = `log_year: 2026
@@ -97,6 +128,58 @@ func TestFilterTextPartIsQuotedPrintablePlainReceipt(t *testing.T) {
 	for _, forbidden := range []string{"# ", "**", "| Recipient |", "```", "✅", "⛔", "⏳", "❓"} {
 		if strings.Contains(decoded, forbidden) {
 			t.Fatalf("decoded text receipt must not require Markdown/glyph rendering; found %q:\n%s", forbidden, decoded)
+		}
+	}
+}
+
+// WO-40: check must report Dovecot sieve mailbox stores as delivered_local.
+func TestCheckDovecotSieveStoredMailIntoMailboxDelivery(t *testing.T) {
+	sent := sentMailWithHeaders("sieve-store@example.test", "clerk@example.test",
+		"From: Sender <sender@example.test>")
+	out := runCheckJSONWithLog(t, sent, filterDovecotSieveStoredLog)
+	for _, want := range []string{
+		`"outcome": "delivered_local"`,
+		`"match_method": "message_id"`,
+		`"relay": "dovecot"`,
+		`"response": "stored mail into mailbox INBOX"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("check output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"outcome": "not_found"`) {
+		t.Fatalf("check must not report Dovecot sieve store as not_found:\n%s", out)
+	}
+}
+
+// WO-40: filter uses the same analysis path after extracting the forwarded email.
+func TestFilterDovecotSieveStoredMailIntoMailboxDelivery(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test, clerk@example.test]
+`
+	sent := sentMailWithHeaders("sieve-store@example.test", "clerk@example.test",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterDovecotSieveStoredLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, want := range []string{
+		`"outcome": "delivered_local"`,
+		`"response": "stored mail into mailbox INBOX"`,
+	} {
+		if !strings.Contains(decodedJSON, want) {
+			t.Fatalf("filter JSON missing %q:\n%s", want, decodedJSON)
+		}
+	}
+	_, _, textBody := filterTextPart(t, out)
+	for _, want := range []string{
+		"  Outcome: DELIVERED_LOCAL",
+		"stored mail into mailbox 'INBOX'",
+	} {
+		if !strings.Contains(textBody, want) {
+			t.Fatalf("filter text missing %q:\n%s", want, textBody)
 		}
 	}
 }
@@ -198,6 +281,271 @@ func TestFilterUnknownAttachmentMessageIDReturnsNotFoundOnly(t *testing.T) {
 	}
 	if strings.Contains(out, "UNRELATED") || strings.Contains(out, "status=sent") {
 		t.Fatalf("unknown attachment message-id must not cite unrelated nearby log lines, got:\n%s", out)
+	}
+}
+
+// WO-36: accepted triggers with recipients but no matching delivery still emit a receipt.
+func TestFilterUnknownAttachmentIncludesSearchedRange(t *testing.T) {
+	out := runFilter(t, "docketing@acme.test", triggerWithAttachment(sentMail("missing@acme.test", "ghost@example.test")), filterConfig)
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "Outcome: NOT FOUND") {
+		t.Fatalf("missing delivery should emit a not_found receipt, got:\n%s", textBody)
+	}
+	if !strings.Contains(textBody, "Searched log time range:") {
+		t.Fatalf("not_found receipt should state searched range, got:\n%s", textBody)
+	}
+}
+
+func TestFilterUnknownAttachmentIncludesFullSearchedCoverage(t *testing.T) {
+	const coverageLog = `2026-06-01T10:00:00+02:00 mail KLMS: clean: message-id="<coverage-start@example.test>": action="Skipped"
+2026-06-05T15:09:02+02:00 mail postfix/cleanup[20420]: ABCDEF1: message-id=<sent-1@acme.test>
+2026-06-05T15:09:20+02:00 mail postfix/smtp[20440]: ABCDEF1: to=<client@example.test>, relay=mx.example.test[203.0.113.25]:25, status=sent (250 OK)
+2026-06-20T18:30:00+02:00 mail postfix/qmgr[20499]: idle
+`
+	out := runFilterWithLogAndArgs(t, "docketing@acme.test",
+		triggerWithAttachment(sentMail("missing@acme.test", "ghost@example.test")), filterConfig, coverageLog)
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "Searched log time range: 2026-06-01 10:00:00 +0200 to 2026-06-20 18:30:00 +0200.") {
+		t.Fatalf("not_found receipt should report full searched coverage, got:\n%s", textBody)
+	}
+}
+
+func TestFilterUnknownAttachmentReportsCoverageWithoutDeliveryLines(t *testing.T) {
+	const scannerOnlyLog = `2026-06-01T10:00:00+02:00 mail KLMS: clean: message-id="<scanner-only@example.test>": action="Skipped"
+2026-06-01T10:30:00+02:00 mail postfix/qmgr[20499]: idle
+`
+	out := runFilterWithLogAndArgs(t, "docketing@acme.test",
+		triggerWithAttachment(sentMail("missing@acme.test", "ghost@example.test")), filterConfig, scannerOnlyLog)
+	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "not_found"`) {
+		t.Fatalf("scanner-only log should still produce a not_found receipt, got:\n%s", out)
+	}
+	_, _, textBody := filterTextPart(t, out)
+	if !strings.Contains(textBody, "Searched log time range: 2026-06-01 10:00:00 +0200 to 2026-06-01 10:30:00 +0200.") {
+		t.Fatalf("not_found receipt should report timestamp coverage without delivery events, got:\n%s", textBody)
+	}
+}
+
+// WO-36: no attachment and no parseable forwarded recipients must be visible.
+func TestFilterNoForwardedMessageWritesAdmittedReason(t *testing.T) {
+	trigger := `From: Sender <sender@example.test>
+To: receipt@example.test
+Subject: receipt request
+
+Please receipt this.
+`
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+`
+	out, errOut := runFilterResultWithLogAndArgs(t, "sender@example.test", trigger, cfg, filterLog)
+	if out != "" {
+		t.Fatalf("unparseable trigger should not emit a reply, got:\n%s", out)
+	}
+	if !strings.Contains(errOut, "no message/rfc822 attachment or parseable forwarded recipients found") {
+		t.Fatalf("stderr should name missing forwarded message, got %q", errOut)
+	}
+}
+
+// WO-36: an attached message with no recipients is an admitted refusal, not silence.
+func TestFilterAttachmentWithNoRecipientsWritesAdmittedReason(t *testing.T) {
+	attached := `From: Sender <sender@example.test>
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <no-recipient@example.test>
+
+body
+`
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+`
+	out, errOut := runFilterResultWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(attached), cfg, filterLog)
+	if out != "" {
+		t.Fatalf("recipientless attachment should not emit a reply, got:\n%s", out)
+	}
+	if !strings.Contains(errOut, "forwarded message attachment has no parsed recipients") {
+		t.Fatalf("stderr should name zero parsed recipients, got %q", errOut)
+	}
+}
+
+// WO-37: Outlook-mangled recipients recovered from the attachment feed delivery lookup.
+func TestFilterOutlookMailtoDoubledRecipientsAreDelivered(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: 'Alpha One' < <mailto:alpha@clientfirm.test> alpha@clientfirm.test>; =\r\n" +
+		" 'Beta Two' < <mailto:beta@clientfirm.test> beta@clientfirm.test>\r\n" +
+		"Cc: Gamma <gamma@example.test>\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 15 Jun 2026 09:00:00 +0000\r\n" +
+		"Message-ID: <outlook-delivered@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterOutlookRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, want := range []string{"alpha@clientfirm.test", "beta@clientfirm.test", "gamma@example.test"} {
+		if !strings.Contains(decodedJSON, `"recipient": "`+want+`"`) {
+			t.Fatalf("filter JSON missing recovered recipient %q:\n%s", want, decodedJSON)
+		}
+	}
+	if got := strings.Count(decodedJSON, `"outcome": "delivered_remote"`); got != 3 {
+		t.Fatalf("all recovered recipients should be delivered_remote, got %d:\n%s", got, decodedJSON)
+	}
+}
+
+// WO-37: a mid-address QP soft break must be rejoined so the recipient still
+// resolves against the delivery log instead of being dropped.
+func TestFilterRecoversMidSoftWrappedRecipient(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: a@client=\r\nfirm.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 15 Jun 2026 09:00:00 +0000\r\n" +
+		"Message-ID: <mid-softwrap@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterMidSoftWrapRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "a@clientfirm.test"`) {
+		t.Fatalf("filter JSON missing rejoined recipient:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("rejoined recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: quoted-printable repair must not corrupt valid =HH local-part bytes.
+func TestFilterPreservesEqualsHexRecipientLocalPart(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("equals-hex@example.test", "case=40example@example.test",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterEqualsHexRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "case=40example@example.test"`) {
+		t.Fatalf("filter JSON missing preserved recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "example@example.test"`) {
+		t.Fatalf("filter must not extract suffix recipient after QP corruption:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("preserved recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: structural-looking =HH local-part bytes remain raw fallback tokens.
+func TestFilterPreservesStructuralEqualsHexRecipientLocalPart(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("structural-equals@example.test", "Case <case=3dexample@example.test> trailing text",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterStructuralEqualsRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "case=3dexample@example.test"`) {
+		t.Fatalf("filter JSON missing preserved structural-looking recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "case=example@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "example@example.test"`) {
+		t.Fatalf("filter must not decode or suffix-match structural-looking raw recipient:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("preserved structural-looking recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: prefix =HH local-part bytes must survive parser fallback and log lookup.
+func TestFilterPreservesPrefixEqualsHexRecipientLocalPart(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("prefix-equals@example.test", "<=3dcase@example.test> trailing text",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterPrefixEqualsRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "=3dcase@example.test"`) {
+		t.Fatalf("filter JSON missing preserved prefix recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "=case@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "case@example.test"`) {
+		t.Fatalf("filter must not decode or suffix-match prefix raw recipient:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("preserved prefix recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: QP-decoded angle delimiters must feed delivery lookup before fallback.
+func TestFilterQuotedPrintableAngleRecipientIsDelivered(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("qp-angle@example.test", "=3Cjohn@example.test=3E",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterQPAngleRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "john@example.test"`) {
+		t.Fatalf("filter JSON missing decoded recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "3cjohn@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "=3cjohn@example.test"`) {
+		t.Fatalf("filter must not use regex fallback before QP decode:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("decoded recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-38: filter can search a rotated gzip log via glob, not only current mail.log.
+func TestFilterSearchesRotatedGzipLogGlob(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("outlook-delivered@example.test", "alpha@clientfirm.test",
+		"From: Sender <sender@example.test>")
+	out, errOut := runFilterResultWithPreparedLog(t, "sender@example.test", triggerWithAttachment(sent), cfg, "mail.log*", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "mail.log"), []byte("Jun 20 10:00:00 mail01 postfix/qmgr[1]: idle\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeGzipFile(t, filepath.Join(dir, "mail.log.2.gz"), filterOutlookRecipientLog)
+	})
+	if errOut != "" {
+		t.Fatalf("filter should not write stderr for rotated-log success, got %q", errOut)
+	}
+	if !strings.Contains(filterDecodedJSON(t, out), `"outcome": "delivered_remote"`) {
+		t.Fatalf("rotated gzip delivery should be found, got:\n%s", out)
 	}
 }
 
@@ -363,6 +711,26 @@ func runFilter(t *testing.T, envelopeFrom, trigger, cfg string) string {
 
 func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArgs ...string) string {
 	t.Helper()
+	return runFilterWithLogAndArgs(t, envelopeFrom, trigger, cfg, filterLog, extraArgs...)
+}
+
+func runFilterWithLogAndArgs(t *testing.T, envelopeFrom, trigger, cfg, logBody string, extraArgs ...string) string {
+	t.Helper()
+	out, _ := runFilterResultWithLogAndArgs(t, envelopeFrom, trigger, cfg, logBody, extraArgs...)
+	return out
+}
+
+func runFilterResultWithLogAndArgs(t *testing.T, envelopeFrom, trigger, cfg, logBody string, extraArgs ...string) (string, string) {
+	t.Helper()
+	return runFilterResultWithPreparedLog(t, envelopeFrom, trigger, cfg, "mail.log", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "mail.log"), []byte(logBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, extraArgs...)
+}
+
+func runFilterResultWithPreparedLog(t *testing.T, envelopeFrom, trigger, cfg, logSpec string, prepare func(string), extraArgs ...string) (string, string) {
+	t.Helper()
 	oldNow := filterNow
 	filterNow = func() time.Time {
 		return time.Date(2026, 6, 7, 14, 2, 0, 0, time.UTC)
@@ -371,11 +739,34 @@ func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArg
 
 	dir := t.TempDir()
 	t.Chdir(dir)
-	logPath := filepath.Join(dir, "mail.log")
-	if err := os.WriteFile(logPath, []byte(filterLog), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".mailreceipt.yml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".mailreceipt.yml"), []byte(cfg), 0o644); err != nil {
+	prepare(dir)
+	cmd := Root()
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&stderr)
+	cmd.SetIn(strings.NewReader(trigger))
+	args := []string{"filter", "--envelope-from", envelopeFrom, "--log", logSpec, "--log-year", "2026"}
+	args = append(args, extraArgs...)
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("filter returned error: %v stderr=%s", err, stderr.String())
+	}
+	return out.String(), stderr.String()
+}
+
+func runCheckJSONWithLog(t *testing.T, message, logBody string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "mail.log")
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	messagePath := filepath.Join(dir, "sent.eml")
+	if err := os.WriteFile(messagePath, []byte(message), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := Root()
@@ -383,12 +774,9 @@ func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArg
 	var stderr bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&stderr)
-	cmd.SetIn(strings.NewReader(trigger))
-	args := []string{"filter", "--envelope-from", envelopeFrom, "--log", logPath, "--log-year", "2026"}
-	args = append(args, extraArgs...)
-	cmd.SetArgs(args)
+	cmd.SetArgs([]string{"check", messagePath, "--log", logPath, "--log-year", "2026", "--format", "json"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("filter returned error: %v stderr=%s", err, stderr.String())
+		t.Fatalf("check returned error: %v stderr=%s", err, stderr.String())
 	}
 	return out.String()
 }
@@ -595,6 +983,24 @@ Message-ID: <` + messageID + `>
 
 body
 `
+}
+
+func writeGzipFile(t *testing.T, path, body string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	if _, err := gz.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // WO-32: a trigger carrying its own Message-ID, so dedup can key on it.

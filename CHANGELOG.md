@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Dovecot Sieve mailbox deliveries are now recognized. When Sieve performs the
+  final store (common for foldering, vacation, and default keep), Dovecot logs
+  `stored mail into mailbox '<name>'` instead of `saved mail to <name>`. Only the
+  latter was recognized, so Sieve-delivered internal mail — the majority of local
+  deliveries on a typical Postfix + Dovecot server — was reported `not_found`.
+  Both markers are now treated as `delivered_local`; Sieve `forwarded` and
+  `discarded` outcomes are correctly not counted as local delivery.
+- Recipients are recovered from Outlook-mangled address headers. Forwarded Outlook
+  messages wrap `To:`/`Cc:` with quoted-printable soft breaks (including
+  mid-address, with no following whitespace), a doubled `< <mailto:a@x> a@x>` form,
+  and `;` separators. These previously parsed to zero recipients, so the filter
+  produced no receipt. The headers are now unfolded and normalized before address
+  parsing. RFC2047 encoded-word subjects (which also end a line in `=`) are left
+  intact.
+- The receipt filter no longer refuses silently. Every terminal state — no
+  attachment, zero parsed recipients, unauthorized sender, loop/dedup suppression,
+  unreadable log — now writes a specific reason to stderr while leaving stdout
+  empty (so the Postfix wrapper still sends no reply). A request that could not
+  produce a receipt is now diagnosable instead of invisible.
+- The `member:` (singular) key in a `receipt_filter` team is now accepted as an
+  alias of `members:`. The singular form previously emptied the team silently, so
+  a sender listed only under `member:` was refused a receipt with no diagnostic.
 - Alias deliveries now correlate to the right recipient. When `/etc/aliases`
   redirects an address to another mailbox (e.g. `j.smith: docketing`),
   Postfix delivers to the target mailbox but logs `orig_to=<original-address>`
@@ -29,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   differs from the address. With multiple recipients and an alias-remapped mailbox
   that matches none of them, the delivery is left `not_found` rather than guessed.
   Dovecot error/discard lines are not treated as delivery.
+- `filter --log` accepts a single path, a comma-separated list, or a glob, and
+  reads `.gz` rotated logs. A receipt request for a message older than the current
+  log no longer misses the delivery in a rotated file, and a `not_found` result
+  reports the time range actually searched.
 
 ## [0.5.1] - 2026-06-09
 

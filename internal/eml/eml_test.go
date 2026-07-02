@@ -29,6 +29,203 @@ body here
 	}
 }
 
+// WO-37: Outlook forwards can QP-soft-wrap address headers and duplicate each
+// recipient as both a mailto URL and a bare addr-spec.
+func TestParseOutlookMailtoDoubledSoftWrappedRecipients(t *testing.T) {
+	raw := "From: Sender <sender@example.test>\r\n" +
+		"To: 'Alpha One' < <mailto:alpha@clientfirm.test> alpha@clientfirm.test>; =\r\n" +
+		" 'Beta Two' < <mailto:beta@clientfirm.test> beta@clientfirm.test>\r\n" +
+		"Cc: 'Gamma Three' < <mailto:gamma@example.test> gamma@example.test>\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 5 Jun 2026 15:09:00 +0000\r\n" +
+		"Message-ID: <outlook-qp@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"alpha@clientfirm.test", "beta@clientfirm.test", "gamma@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: a QP soft break can land mid-address with no following whitespace; the
+// repair must rejoin the token instead of dropping the recipient. The
+// whitespace-required form missed this and returned zero recipients.
+func TestParseMidAddressSoftWrappedRecipient(t *testing.T) {
+	raw := "From: Sender <sender@example.test>\r\n" +
+		"To: a@client=\r\nfirm.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 5 Jun 2026 15:09:00 +0000\r\n" +
+		"Message-ID: <mid-softwrap@example.test>\r\n" +
+		"\r\n" +
+		"body\r\n"
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"a@clientfirm.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: Outlook frequently uses semicolons where RFC5322 expects commas.
+func TestParseSemicolonSeparatedRecipients(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: First <first@example.test>; Second <second@example.test>, third@example.test
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <semicolon@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"first@example.test", "second@example.test", "third@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: valid local-parts may contain =HH bytes; QP repair must not rewrite them.
+func TestParsePreservesEqualsHexLocalPart(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: Case <case=40example@example.test>
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <equals-hex@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"case=40example@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: fallback must not scan a QP-corrupted copy when raw tokens are valid.
+func TestParseFallbackPreservesEqualsHexLocalPart(t *testing.T) {
+	tests := []struct {
+		name      string
+		recipient string
+	}{
+		{name: "at sign", recipient: "case=40example@example.test"},
+		{name: "equals", recipient: "case=3dexample@example.test"},
+		{name: "space", recipient: "case=20example@example.test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `From: Sender <sender@example.test>
+To: Case <` + tt.recipient + `> trailing text
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <equals-hex-fallback@example.test>
+
+body
+`
+			e, err := Parse(strings.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := e.Recipients()
+			want := []string{tt.recipient}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("recipients: want %v, got %v", want, got)
+			}
+		})
+	}
+}
+
+// WO-37: valid local-parts may begin with =HH bytes; prefix QP-looking bytes
+// must not be treated as encoded delimiters when they are literal addr-spec text.
+func TestParseFallbackPreservesEqualsHexPrefixLocalPart(t *testing.T) {
+	tests := []struct {
+		name      string
+		recipient string
+	}{
+		{name: "equals", recipient: "=3dcase@example.test"},
+		{name: "space", recipient: "=20case@example.test"},
+		{name: "left angle", recipient: "=3ccase@example.test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `From: Sender <sender@example.test>
+To: <` + tt.recipient + `> trailing text
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <equals-hex-prefix@example.test>
+
+body
+`
+			e, err := Parse(strings.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := e.Recipients()
+			want := []string{tt.recipient}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("recipients: want %v, got %v", want, got)
+			}
+		})
+	}
+}
+
+// WO-37: QP-encoded angle brackets must decode before regex fallback runs.
+func TestParseQuotedPrintableAngleRecipient(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: =3Cjohn@example.test=3E
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <qp-angle@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"john@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
+// WO-37: lenient pasted blocks need the same folded-header recovery as RFC822.
+func TestParseLenientFoldedOutlookRecipients(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+Sent: Friday, June 5, 2026 3:09 PM
+To: 'Alpha One' < <mailto:alpha@clientfirm.test> alpha@clientfirm.test>; =
+  'Beta Two' < <mailto:beta@clientfirm.test> beta@clientfirm.test>
+Cc: Gamma <gamma@example.test>; Delta <delta@example.test>
+Subject: Filing
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"alpha@clientfirm.test", "beta@clientfirm.test", "gamma@example.test", "delta@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
 // WO-25: receipt subjects should be readable even when the original mail uses MIME encoded-words.
 func TestParseRFC2047Subjects(t *testing.T) {
 	tests := []struct {

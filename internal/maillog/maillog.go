@@ -56,8 +56,11 @@ type Event struct {
 // recovered from cleanup lines (so events that lack an inline message-id can
 // still be linked).
 type Log struct {
-	Events     []Event
-	queueToMsg map[string]string
+	Events           []Event
+	queueToMsg       map[string]string
+	coverageFirst    time.Time // WO-38: earliest timestamp seen in any decoded log line.
+	coverageLast     time.Time // WO-38: latest timestamp seen in any decoded log line.
+	coverageFirstRaw string    // WO-38: raw timestamp form used for doctor timestamp diagnostics.
 	// seenMsgIDs records every message-id observed in ANY log line (postfix delivery
 	// lines AND non-delivery lines such as antivirus/scanner records), lowercased.
 	// WO-33: lets a not_found distinguish "no trace at all" from "seen in the log but
@@ -72,12 +75,64 @@ func (l Log) SawMessageID(mid string) bool {
 	return ok
 }
 
+// TimeRange returns the earliest and latest parsed delivery-event timestamps.
+// WO-38: receipts and doctor output need the searched evidence range so a
+// not_found result is bounded by what the log actually covered.
+func (l Log) TimeRange() (time.Time, time.Time, bool) {
+	var first, last time.Time
+	for _, ev := range l.Events {
+		if ev.Time.IsZero() {
+			continue
+		}
+		if first.IsZero() || ev.Time.Before(first) {
+			first = ev.Time
+		}
+		if last.IsZero() || ev.Time.After(last) {
+			last = ev.Time
+		}
+	}
+	if first.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	return first, last, true
+}
+
+// CoverageRange returns the earliest and latest timestamps seen in any decoded log line.
+func (l Log) CoverageRange() (time.Time, time.Time, bool) {
+	if l.coverageFirst.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	return l.coverageFirst, l.coverageLast, true
+}
+
+// CoverageTimeRaw returns the raw timestamp text for the earliest covered log line.
+func (l Log) CoverageTimeRaw() (string, bool) {
+	if l.coverageFirstRaw == "" {
+		return "", false
+	}
+	return l.coverageFirstRaw, true
+}
+
+func (l *Log) recordCoverage(tsRaw string, t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	if l.coverageFirst.IsZero() || t.Before(l.coverageFirst) {
+		l.coverageFirst = t
+		l.coverageFirstRaw = tsRaw
+	}
+	if l.coverageLast.IsZero() || t.After(l.coverageLast) {
+		l.coverageLast = t
+	}
+}
+
 var (
 	// The leading syslog timestamp + host + "postfix/<daemon>[pid]: <queue>: rest"
 	// We capture the timestamp, the queue id, and the remainder. The timestamp is
 	// either the traditional BSD form ("Jun  5 14:09:36") or the RFC3339/ISO-8601
 	// form modern rsyslog emits by default ("2026-06-05T14:09:36.750604+02:00").
-	lineRe = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/(?P<daemon>\w+)\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
+	lineRe      = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+postfix/(?P<daemon>\w+)\[\d+\]:\s+(?P<qid>[0-9A-F]{6,}):\s+(?P<rest>.*)$`)
+	timestampRe = regexp.MustCompile(`^(\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+`)
 
 	messageIDRe = regexp.MustCompile(`message-id=<?([^>\s,]+)>?`)
 	// anyMessageIDRe matches message-id on ANY line, including non-postfix scanner
@@ -87,15 +142,16 @@ var (
 	toRe           = regexp.MustCompile(`\bto=<([^>]*)>`)
 	origToRe       = regexp.MustCompile(`\borig_to=<([^>]*)>`)
 
-	// WO-34: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda, or
-	// LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines are a
-	// LOCAL mailbox handoff -> delivered_local. We match the leading timestamp + host,
-	// then a dovecot lda()/lmtp() line whose recipient and msgid we extract, plus the
-	// "saved mail to <mailbox>" success marker. Tolerant of version-specific extra
-	// fields (PID, <session>, +X ms).
+	// WO-34/WO-40: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda,
+	// or LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines
+	// are a LOCAL mailbox handoff -> delivered_local. We match the leading timestamp
+	// + host, then a dovecot lda()/lmtp() line whose recipient and msgid we extract,
+	// plus a real-world successful-store marker. Observed success markers are
+	// "saved mail to <mailbox>" and sieve's "stored mail into mailbox '<mailbox>'".
+	// Non-store sieve outcomes such as forwarded or discarded must not match.
 	dovecotLineRe  = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+dovecot:\s+(?P<agent>lda|lmtp)\((?P<who>[^)]*)\).*$`)
 	dovecotMsgIDRe = regexp.MustCompile(`(?i)msgid=<?([^>\s,]+)>?`)
-	dovecotSaveRe  = regexp.MustCompile(`(?i)saved mail to\s+(.+?)\s*$`)
+	dovecotStoreRe = regexp.MustCompile(`(?i)(saved mail to|stored mail into mailbox)\s+'?(.+?)'?\s*$`)
 	// lmtpRcptRe pulls a recipient out of the dovecot agent parenthetical when it is
 	// an address (LDA: lda(user@dom); LMTP often lmtp(PID, user@dom) or lmtp(PID)).
 	emailInTextRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+`)
@@ -129,32 +185,45 @@ func parseTimestamp(tsRaw string, year int) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+func parseLineTimestamp(line string, year int) (string, time.Time, bool) {
+	m := timestampRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", time.Time{}, false
+	}
+	t, ok := parseTimestamp(m[1], year)
+	return m[1], t, ok
+}
+
 // parseDovecotLine recognizes a Dovecot LDA/LMTP local mailbox delivery, e.g.:
 //
-//	... dovecot: lda(auser@acme.test): msgid=<id>: saved mail to INBOX
-//	... dovecot: lmtp(1234, user@dom): ... msgid=<id>: ... saved mail to INBOX
+//	... dovecot: lda(auser@example.test): msgid=<id>: saved mail to INBOX
+//	... dovecot: lmtp(1234, user@example.test): ... msgid=<id>: ... saved mail to INBOX
+//	... dovecot: lda(clerk)<pid><sess>: sieve: msgid=<id>: stored mail into mailbox 'INBOX'
 //
-// A "saved mail to" line is a successful LOCAL mailbox handoff -> the event's
-// Daemon is set to "dovecot" so the deliver layer classifies it delivered_local
-// (never remote/SMTP-2xx). Returns ok=false for any dovecot line that is not a
-// completed save (so deferrals/errors are not treated as delivery).
+// A successful-store line is a LOCAL mailbox handoff -> the event's Daemon is set
+// to "dovecot" so the deliver layer classifies it delivered_local (never
+// remote/SMTP-2xx). Returns ok=false for any dovecot line that is not a completed
+// local store, so deferrals, forwards, discards, and errors are not treated as
+// delivery.
 func parseDovecotLine(line string, year int) (Event, bool) {
 	m := dovecotLineRe.FindStringSubmatch(line)
 	if m == nil {
 		return Event{}, false
 	}
-	// Only a completed mailbox save counts as a delivery.
-	save := dovecotSaveRe.FindStringSubmatch(line)
-	if save == nil {
+	// WO-40: only successful local-store markers count as Dovecot delivery.
+	store := dovecotStoreRe.FindStringSubmatch(line)
+	if store == nil {
 		return Event{}, false
 	}
 	tsRaw, who := m[1], m[3]
+	marker := strings.ToLower(strings.TrimSpace(store[1]))
+	mailbox := strings.TrimSpace(store[2])
 
 	ev := Event{
 		Daemon:   "dovecot",
 		Status:   StatusSent,
 		Relay:    "dovecot",
-		Response: "saved mail to " + strings.TrimSpace(save[1]),
+		Response: marker + " " + mailbox,
 		RawLine:  line,
 		TimeRaw:  tsRaw,
 	}
@@ -189,6 +258,9 @@ func Parse(r io.Reader, year int) Log {
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
+		if tsRaw, t, ok := parseLineTimestamp(line, year); ok {
+			l.recordCoverage(tsRaw, t)
+		}
 		// WO-33: record every message-id seen on ANY line (incl. non-postfix scanner
 		// lines) before filtering to postfix delivery lines.
 		if mid := anyMessageIDRe.FindStringSubmatch(line); mid != nil {
