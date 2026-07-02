@@ -33,8 +33,8 @@ body here
 // recipient as both a mailto URL and a bare addr-spec.
 func TestParseOutlookMailtoDoubledSoftWrappedRecipients(t *testing.T) {
 	raw := "From: Sender <sender@example.test>\r\n" +
-		"To: 'Alpha One' < <mailto:alpha@obwb.test> alpha@obwb.test>; =\r\n" +
-		" 'Beta Two' < <mailto:beta@obwb.test> beta@obwb.test>\r\n" +
+		"To: 'Alpha One' < <mailto:alpha@clientfirm.test> alpha@clientfirm.test>; =\r\n" +
+		" 'Beta Two' < <mailto:beta@clientfirm.test> beta@clientfirm.test>\r\n" +
 		"Cc: 'Gamma Three' < <mailto:gamma@example.test> gamma@example.test>\r\n" +
 		"Subject: Filing\r\n" +
 		"Date: Fri, 5 Jun 2026 15:09:00 +0000\r\n" +
@@ -46,7 +46,7 @@ func TestParseOutlookMailtoDoubledSoftWrappedRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := e.Recipients()
-	want := []string{"alpha@obwb.test", "beta@obwb.test", "gamma@example.test"}
+	want := []string{"alpha@clientfirm.test", "beta@clientfirm.test", "gamma@example.test"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients: want %v, got %v", want, got)
 	}
@@ -57,7 +57,7 @@ func TestParseOutlookMailtoDoubledSoftWrappedRecipients(t *testing.T) {
 // whitespace-required form missed this and returned zero recipients.
 func TestParseMidAddressSoftWrappedRecipient(t *testing.T) {
 	raw := "From: Sender <sender@example.test>\r\n" +
-		"To: a@ob=\r\nwb.test\r\n" +
+		"To: a@client=\r\nfirm.test\r\n" +
 		"Subject: Filing\r\n" +
 		"Date: Fri, 5 Jun 2026 15:09:00 +0000\r\n" +
 		"Message-ID: <mid-softwrap@example.test>\r\n" +
@@ -68,7 +68,7 @@ func TestParseMidAddressSoftWrappedRecipient(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := e.Recipients()
-	want := []string{"a@obwb.test"}
+	want := []string{"a@clientfirm.test"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients: want %v, got %v", want, got)
 	}
@@ -208,8 +208,8 @@ body
 func TestParseLenientFoldedOutlookRecipients(t *testing.T) {
 	raw := `From: Sender <sender@example.test>
 Sent: Friday, June 5, 2026 3:09 PM
-To: 'Alpha One' < <mailto:alpha@obwb.test> alpha@obwb.test>; =
-  'Beta Two' < <mailto:beta@obwb.test> beta@obwb.test>
+To: 'Alpha One' < <mailto:alpha@clientfirm.test> alpha@clientfirm.test>; =
+  'Beta Two' < <mailto:beta@clientfirm.test> beta@clientfirm.test>
 Cc: Gamma <gamma@example.test>; Delta <delta@example.test>
 Subject: Filing
 
@@ -220,7 +220,7 @@ body
 		t.Fatal(err)
 	}
 	got := e.Recipients()
-	want := []string{"alpha@obwb.test", "beta@obwb.test", "gamma@example.test", "delta@example.test"}
+	want := []string{"alpha@clientfirm.test", "beta@clientfirm.test", "gamma@example.test", "delta@example.test"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients: want %v, got %v", want, got)
 	}

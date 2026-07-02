@@ -27,8 +27,8 @@ Jul  2 08:12:01 mail01 dovecot: lda(clerk)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: sie
 `
 
 const filterOutlookRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3000]: ABCD01: message-id=<outlook-delivered@example.test>
-Jun 15 09:00:01 mail01 postfix/smtp[3001]: ABCD01: to=<alpha@obwb.test>, relay=mx.obwb.test[203.0.113.11]:25, status=sent (250 OK alpha)
-Jun 15 09:00:02 mail01 postfix/smtp[3001]: ABCD01: to=<beta@obwb.test>, relay=mx.obwb.test[203.0.113.12]:25, status=sent (250 OK beta)
+Jun 15 09:00:01 mail01 postfix/smtp[3001]: ABCD01: to=<alpha@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.11]:25, status=sent (250 OK alpha)
+Jun 15 09:00:02 mail01 postfix/smtp[3001]: ABCD01: to=<beta@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.12]:25, status=sent (250 OK beta)
 Jun 15 09:00:03 mail01 postfix/smtp[3001]: ABCD01: to=<gamma@example.test>, relay=mx.example.test[203.0.113.13]:25, status=sent (250 OK gamma)
 `
 
@@ -49,7 +49,7 @@ Jun 15 09:00:01 mail01 postfix/smtp[3021]: ABCD20: to=<john@example.test>, relay
 `
 
 const filterMidSoftWrapRecipientLog = `Jun 15 09:00:00 mail01 postfix/cleanup[3030]: ABCD30: message-id=<mid-softwrap@example.test>
-Jun 15 09:00:01 mail01 postfix/smtp[3031]: ABCD30: to=<a@obwb.test>, relay=mx.obwb.test[203.0.113.18]:25, status=sent (250 OK mid)
+Jun 15 09:00:01 mail01 postfix/smtp[3031]: ABCD30: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.18]:25, status=sent (250 OK mid)
 `
 
 const filterConfig = `log_year: 2026
@@ -378,8 +378,8 @@ func TestFilterOutlookMailtoDoubledRecipientsAreDelivered(t *testing.T) {
       members: [sender@example.test]
 `
 	sent := "From: Sender <sender@example.test>\r\n" +
-		"To: 'Alpha One' < <mailto:alpha@obwb.test> alpha@obwb.test>; =\r\n" +
-		" 'Beta Two' < <mailto:beta@obwb.test> beta@obwb.test>\r\n" +
+		"To: 'Alpha One' < <mailto:alpha@clientfirm.test> alpha@clientfirm.test>; =\r\n" +
+		" 'Beta Two' < <mailto:beta@clientfirm.test> beta@clientfirm.test>\r\n" +
 		"Cc: Gamma <gamma@example.test>\r\n" +
 		"Subject: Filing\r\n" +
 		"Date: Fri, 15 Jun 2026 09:00:00 +0000\r\n" +
@@ -388,7 +388,7 @@ func TestFilterOutlookMailtoDoubledRecipientsAreDelivered(t *testing.T) {
 		"body\r\n"
 	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterOutlookRecipientLog)
 	decodedJSON := filterDecodedJSON(t, out)
-	for _, want := range []string{"alpha@obwb.test", "beta@obwb.test", "gamma@example.test"} {
+	for _, want := range []string{"alpha@clientfirm.test", "beta@clientfirm.test", "gamma@example.test"} {
 		if !strings.Contains(decodedJSON, `"recipient": "`+want+`"`) {
 			t.Fatalf("filter JSON missing recovered recipient %q:\n%s", want, decodedJSON)
 		}
@@ -409,7 +409,7 @@ func TestFilterRecoversMidSoftWrappedRecipient(t *testing.T) {
       members: [sender@example.test]
 `
 	sent := "From: Sender <sender@example.test>\r\n" +
-		"To: a@ob=\r\nwb.test\r\n" +
+		"To: a@client=\r\nfirm.test\r\n" +
 		"Subject: Filing\r\n" +
 		"Date: Fri, 15 Jun 2026 09:00:00 +0000\r\n" +
 		"Message-ID: <mid-softwrap@example.test>\r\n" +
@@ -417,7 +417,7 @@ func TestFilterRecoversMidSoftWrappedRecipient(t *testing.T) {
 		"body\r\n"
 	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterMidSoftWrapRecipientLog)
 	decodedJSON := filterDecodedJSON(t, out)
-	if !strings.Contains(decodedJSON, `"recipient": "a@obwb.test"`) {
+	if !strings.Contains(decodedJSON, `"recipient": "a@clientfirm.test"`) {
 		t.Fatalf("filter JSON missing rejoined recipient:\n%s", decodedJSON)
 	}
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
@@ -533,7 +533,7 @@ func TestFilterSearchesRotatedGzipLogGlob(t *testing.T) {
     legal:
       members: [sender@example.test]
 `
-	sent := sentMailWithHeaders("outlook-delivered@example.test", "alpha@obwb.test",
+	sent := sentMailWithHeaders("outlook-delivered@example.test", "alpha@clientfirm.test",
 		"From: Sender <sender@example.test>")
 	out, errOut := runFilterResultWithPreparedLog(t, "sender@example.test", triggerWithAttachment(sent), cfg, "mail.log*", func(dir string) {
 		if err := os.WriteFile(filepath.Join(dir, "mail.log"), []byte("Jun 20 10:00:00 mail01 postfix/qmgr[1]: idle\n"), 0o644); err != nil {
