@@ -107,32 +107,54 @@ func TestParseMixedTimestampFormats(t *testing.T) {
 // WO-34: Dovecot LDA/LMTP local mailbox deliveries (the common Postfix+Dovecot
 // internal-delivery path) are parsed as delivery events.
 func TestParseDovecotLDADelivery(t *testing.T) {
-	const log = `2026-06-09T09:28:52+02:00 mail dovecot: lda(a.user)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: msgid=<dv-1@acme.test>: saved mail to INBOX
+	const log = `2026-06-09T09:28:52+02:00 mail dovecot: lda(a.user)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: msgid=<dv-1@example.test>: saved mail to INBOX
 `
 	l := Parse(strings.NewReader(log), 2026)
 	if len(l.Events) != 1 {
 		t.Fatalf("dovecot lda save should yield 1 event, got %d", len(l.Events))
 	}
 	e := l.Events[0]
-	if e.Daemon != "dovecot" || e.Status != StatusSent || e.To != "a.user" || e.MessageID != "dv-1@acme.test" {
+	if e.Daemon != "dovecot" || e.Status != StatusSent || e.To != "a.user" || e.MessageID != "dv-1@example.test" {
 		t.Fatalf("dovecot event fields wrong: %+v", e)
+	}
+	if e.Response != "saved mail to INBOX" {
+		t.Fatalf("dovecot response should name saved mailbox, got %q", e.Response)
 	}
 }
 
 func TestParseDovecotLMTPDelivery(t *testing.T) {
-	const log = `2026-06-09T10:00:00+02:00 mail dovecot: lmtp(4242, auser@acme.test): msgid=<dv-2@acme.test>: saved mail to INBOX/Maildir
+	const log = `2026-06-09T10:00:00+02:00 mail dovecot: lmtp(4242, auser@example.test): msgid=<dv-2@example.test>: saved mail to INBOX/Maildir
 `
 	l := Parse(strings.NewReader(log), 2026)
-	if len(l.Events) != 1 || l.Events[0].To != "auser@acme.test" || l.Events[0].MessageID != "dv-2@acme.test" {
+	if len(l.Events) != 1 || l.Events[0].To != "auser@example.test" || l.Events[0].MessageID != "dv-2@example.test" {
 		t.Fatalf("dovecot lmtp parse wrong: %+v", l.Events)
 	}
 }
 
-func TestDovecotNonSaveLineIsNotDelivery(t *testing.T) {
-	// A dovecot line without "saved mail to" (e.g. an error/info line) is not a delivery.
-	const log = `2026-06-09T10:00:00+02:00 mail dovecot: lda(x@p.com): sieve: msgid=<e1@p.com>: marked message to be discarded
+// WO-40: Dovecot sieve local-store lines use "stored mail into mailbox", not the
+// WO-34 "saved mail to" marker. This is still a successful local handoff.
+func TestParseDovecotSieveStoredMailIntoMailboxDelivery(t *testing.T) {
+	const log = `2026-07-02T08:12:01+02:00 mail dovecot: lda(clerk)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: sieve: msgid=<sieve-store@example.test>: stored mail into mailbox 'INBOX'
+`
+	l := Parse(strings.NewReader(log), 2026)
+	if len(l.Events) != 1 {
+		t.Fatalf("dovecot sieve store should yield 1 event, got %d", len(l.Events))
+	}
+	e := l.Events[0]
+	if e.Daemon != "dovecot" || e.Status != StatusSent || e.To != "clerk" || e.MessageID != "sieve-store@example.test" {
+		t.Fatalf("dovecot sieve event fields wrong: %+v", e)
+	}
+	if e.Response != "stored mail into mailbox INBOX" {
+		t.Fatalf("dovecot sieve response should name stored mailbox, got %q", e.Response)
+	}
+}
+
+func TestDovecotNonStoreSieveLinesAreNotDeliveries(t *testing.T) {
+	const log = `2026-07-02T08:12:01+02:00 mail dovecot: lda(clerk)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: sieve: msgid=<sieve-forward@example.test>: forwarded to <archive@example.test>
+2026-07-02T08:12:02+02:00 mail dovecot: lda(jsmith)<4050778><7SQCDm4XKGpZzz0ASWwcBg>: sieve: msgid=<sieve-discard@example.test>: discarded
+2026-07-02T08:12:03+02:00 mail dovecot: lda(clerk): sieve: msgid=<sieve-marked-discard@example.test>: marked message to be discarded
 `
 	if l := Parse(strings.NewReader(log), 2026); len(l.Events) != 0 {
-		t.Fatalf("non-save dovecot line must not be a delivery, got %+v", l.Events)
+		t.Fatalf("non-store dovecot lines must not be deliveries, got %+v", l.Events)
 	}
 }

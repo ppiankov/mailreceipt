@@ -21,6 +21,10 @@ Jun  5 15:09:03 mail01 postfix/cleanup[20421]: ABCDEF2: message-id=<unrelated@ac
 Jun  5 15:09:21 mail01 postfix/smtp[20441]: ABCDEF2: to=<ghost@example.test>, relay=mx.example.test[203.0.113.25]:25, status=sent (250 2.0.0 OK: queued as UNRELATED)
 `
 
+const filterDovecotSieveStoredLog = `Jul  2 08:12:00 mail01 postfix/cleanup[4000]: STORE1: message-id=<sieve-store@example.test>
+Jul  2 08:12:01 mail01 dovecot: lda(clerk)<4050777><6SQCDm4XKGpZzz0ASWwcBg>: sieve: msgid=<sieve-store@example.test>: stored mail into mailbox 'INBOX'
+`
+
 const filterConfig = `log_year: 2026
 receipt_filter:
   domains: [acme.test]
@@ -97,6 +101,58 @@ func TestFilterTextPartIsQuotedPrintablePlainReceipt(t *testing.T) {
 	for _, forbidden := range []string{"# ", "**", "| Recipient |", "```", "✅", "⛔", "⏳", "❓"} {
 		if strings.Contains(decoded, forbidden) {
 			t.Fatalf("decoded text receipt must not require Markdown/glyph rendering; found %q:\n%s", forbidden, decoded)
+		}
+	}
+}
+
+// WO-40: check must report Dovecot sieve mailbox stores as delivered_local.
+func TestCheckDovecotSieveStoredMailIntoMailboxDelivery(t *testing.T) {
+	sent := sentMailWithHeaders("sieve-store@example.test", "clerk@example.test",
+		"From: Sender <sender@example.test>")
+	out := runCheckJSONWithLog(t, sent, filterDovecotSieveStoredLog)
+	for _, want := range []string{
+		`"outcome": "delivered_local"`,
+		`"match_method": "message_id"`,
+		`"relay": "dovecot"`,
+		`"response": "stored mail into mailbox INBOX"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("check output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"outcome": "not_found"`) {
+		t.Fatalf("check must not report Dovecot sieve store as not_found:\n%s", out)
+	}
+}
+
+// WO-40: filter uses the same analysis path after extracting the forwarded email.
+func TestFilterDovecotSieveStoredMailIntoMailboxDelivery(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test, clerk@example.test]
+`
+	sent := sentMailWithHeaders("sieve-store@example.test", "clerk@example.test",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterDovecotSieveStoredLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, want := range []string{
+		`"outcome": "delivered_local"`,
+		`"response": "stored mail into mailbox INBOX"`,
+	} {
+		if !strings.Contains(decodedJSON, want) {
+			t.Fatalf("filter JSON missing %q:\n%s", want, decodedJSON)
+		}
+	}
+	_, _, textBody := filterTextPart(t, out)
+	for _, want := range []string{
+		"  Outcome: DELIVERED_LOCAL",
+		"stored mail into mailbox 'INBOX'",
+	} {
+		if !strings.Contains(textBody, want) {
+			t.Fatalf("filter text missing %q:\n%s", want, textBody)
 		}
 	}
 }
@@ -363,6 +419,11 @@ func runFilter(t *testing.T, envelopeFrom, trigger, cfg string) string {
 
 func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArgs ...string) string {
 	t.Helper()
+	return runFilterWithLogAndArgs(t, envelopeFrom, trigger, cfg, filterLog, extraArgs...)
+}
+
+func runFilterWithLogAndArgs(t *testing.T, envelopeFrom, trigger, cfg, logBody string, extraArgs ...string) string {
+	t.Helper()
 	oldNow := filterNow
 	filterNow = func() time.Time {
 		return time.Date(2026, 6, 7, 14, 2, 0, 0, time.UTC)
@@ -372,7 +433,7 @@ func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArg
 	dir := t.TempDir()
 	t.Chdir(dir)
 	logPath := filepath.Join(dir, "mail.log")
-	if err := os.WriteFile(logPath, []byte(filterLog), 0o644); err != nil {
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".mailreceipt.yml"), []byte(cfg), 0o644); err != nil {
@@ -389,6 +450,29 @@ func runFilterWithArgs(t *testing.T, envelopeFrom, trigger, cfg string, extraArg
 	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("filter returned error: %v stderr=%s", err, stderr.String())
+	}
+	return out.String()
+}
+
+func runCheckJSONWithLog(t *testing.T, message, logBody string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "mail.log")
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	messagePath := filepath.Join(dir, "sent.eml")
+	if err := os.WriteFile(messagePath, []byte(message), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := Root()
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"check", messagePath, "--log", logPath, "--log-year", "2026", "--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("check returned error: %v stderr=%s", err, stderr.String())
 	}
 	return out.String()
 }

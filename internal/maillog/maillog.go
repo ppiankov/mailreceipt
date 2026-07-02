@@ -87,15 +87,16 @@ var (
 	toRe           = regexp.MustCompile(`\bto=<([^>]*)>`)
 	origToRe       = regexp.MustCompile(`\borig_to=<([^>]*)>`)
 
-	// WO-34: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda, or
-	// LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines are a
-	// LOCAL mailbox handoff -> delivered_local. We match the leading timestamp + host,
-	// then a dovecot lda()/lmtp() line whose recipient and msgid we extract, plus the
-	// "saved mail to <mailbox>" success marker. Tolerant of version-specific extra
-	// fields (PID, <session>, +X ms).
+	// WO-34/WO-40: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda,
+	// or LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines
+	// are a LOCAL mailbox handoff -> delivered_local. We match the leading timestamp
+	// + host, then a dovecot lda()/lmtp() line whose recipient and msgid we extract,
+	// plus a real-world successful-store marker. Observed success markers are
+	// "saved mail to <mailbox>" and sieve's "stored mail into mailbox '<mailbox>'".
+	// Non-store sieve outcomes such as forwarded or discarded must not match.
 	dovecotLineRe  = regexp.MustCompile(`^(?P<ts>\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+\S+\s+dovecot:\s+(?P<agent>lda|lmtp)\((?P<who>[^)]*)\).*$`)
 	dovecotMsgIDRe = regexp.MustCompile(`(?i)msgid=<?([^>\s,]+)>?`)
-	dovecotSaveRe  = regexp.MustCompile(`(?i)saved mail to\s+(.+?)\s*$`)
+	dovecotStoreRe = regexp.MustCompile(`(?i)(saved mail to|stored mail into mailbox)\s+'?(.+?)'?\s*$`)
 	// lmtpRcptRe pulls a recipient out of the dovecot agent parenthetical when it is
 	// an address (LDA: lda(user@dom); LMTP often lmtp(PID, user@dom) or lmtp(PID)).
 	emailInTextRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+`)
@@ -131,30 +132,34 @@ func parseTimestamp(tsRaw string, year int) (time.Time, bool) {
 
 // parseDovecotLine recognizes a Dovecot LDA/LMTP local mailbox delivery, e.g.:
 //
-//	... dovecot: lda(auser@acme.test): msgid=<id>: saved mail to INBOX
-//	... dovecot: lmtp(1234, user@dom): ... msgid=<id>: ... saved mail to INBOX
+//	... dovecot: lda(auser@example.test): msgid=<id>: saved mail to INBOX
+//	... dovecot: lmtp(1234, user@example.test): ... msgid=<id>: ... saved mail to INBOX
+//	... dovecot: lda(clerk)<pid><sess>: sieve: msgid=<id>: stored mail into mailbox 'INBOX'
 //
-// A "saved mail to" line is a successful LOCAL mailbox handoff -> the event's
-// Daemon is set to "dovecot" so the deliver layer classifies it delivered_local
-// (never remote/SMTP-2xx). Returns ok=false for any dovecot line that is not a
-// completed save (so deferrals/errors are not treated as delivery).
+// A successful-store line is a LOCAL mailbox handoff -> the event's Daemon is set
+// to "dovecot" so the deliver layer classifies it delivered_local (never
+// remote/SMTP-2xx). Returns ok=false for any dovecot line that is not a completed
+// local store, so deferrals, forwards, discards, and errors are not treated as
+// delivery.
 func parseDovecotLine(line string, year int) (Event, bool) {
 	m := dovecotLineRe.FindStringSubmatch(line)
 	if m == nil {
 		return Event{}, false
 	}
-	// Only a completed mailbox save counts as a delivery.
-	save := dovecotSaveRe.FindStringSubmatch(line)
-	if save == nil {
+	// WO-40: only successful local-store markers count as Dovecot delivery.
+	store := dovecotStoreRe.FindStringSubmatch(line)
+	if store == nil {
 		return Event{}, false
 	}
 	tsRaw, who := m[1], m[3]
+	marker := strings.ToLower(strings.TrimSpace(store[1]))
+	mailbox := strings.TrimSpace(store[2])
 
 	ev := Event{
 		Daemon:   "dovecot",
 		Status:   StatusSent,
 		Relay:    "dovecot",
-		Response: "saved mail to " + strings.TrimSpace(save[1]),
+		Response: marker + " " + mailbox,
 		RawLine:  line,
 		TimeRaw:  tsRaw,
 	}
