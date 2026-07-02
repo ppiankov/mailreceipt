@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-02
+
 ### Fixed
 - Dovecot Sieve mailbox deliveries are now recognized. When Sieve performs the
   final store (common for foldering, vacation, and default keep), Dovecot logs
