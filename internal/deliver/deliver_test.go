@@ -531,3 +531,72 @@ Jun 19 15:00:02 mail01 postfix/smtp[901]: A1DDDD19: to=<b@clientfirm.test>, rela
 		}
 	}
 }
+
+// WO-42 rev-5 (Finding 3, safety): a multi-recipient forward with a KNOWN sender
+// must NOT fall to the per-recipient window when candidate deliveries carry no
+// sender to confirm. It stays not_found rather than attribute without the sender
+// component of the join key.
+func TestRecipientSetMatchKnownSenderNoConfirmationStaysNotFound(t *testing.T) {
+	log := parseLog(t, `Jun 19 15:00:02 mail01 postfix/smtp[901]: A1A0AA19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1A0AA19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 b)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	e := eml.Email{From: "Sender <sender@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if r := find(res, rcpt); r.Outcome != NotFound {
+			t.Fatalf("%s: known sender + unconfirmable candidate must stay not_found, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
+	}
+}
+
+// WO-42 rev-5 (Finding 2, delegated): the forwarded message's From and Sender are
+// both sender candidates. A send-on-behalf message (From: principal, Sender:
+// assistant) whose logged envelope sender is the assistant must resolve.
+func TestRecipientSetMatchDelegatedSenderResolves(t *testing.T) {
+	log := parseLog(t, `Jun 19 15:00:00 mail01 postfix/qmgr[900]: A1B0BB19: from=<assistant@example.test>, size=1, nrcpt=2 (queue active)
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1B0BB19: message-id=<wire@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1B0BB19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1B0BB19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 b)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	e := eml.Email{From: "Principal <principal@example.test>", Sender: "Assistant <assistant@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if r := find(res, rcpt); r.Outcome != DeliveredRemote || r.Match != MatchRecipientSet {
+			t.Fatalf("%s: delegated sender (Sender matches log) should resolve, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
+	}
+	// Neither From nor Sender matches the logged sender -> not_found.
+	eMiss := eml.Email{From: "X <x@example.test>", Sender: "Y <y@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	for _, r := range Analyze(eMiss, log).Recipients {
+		if r.Outcome != NotFound {
+			t.Fatalf("neither From nor Sender matching logged sender must stay not_found, got %s", r.Outcome)
+		}
+	}
+}
+
+// WO-42 rev-5 (Finding 1, KLMS): a KLMS scanner line supplies the message-id's
+// sender + full recipient set (identification), while queue-id delivery lines
+// supply the per-recipient outcomes. A forward with a non-matching Message-ID but
+// matching sender/date/set resolves every recipient via recipient_set, cited from
+// delivery lines only.
+func TestRecipientSetMatchKLMSIdentifiesSet(t *testing.T) {
+	log := parseLog(t, `Jun 19 15:00:00 mail01 KLMS: clean: message-id="<wire@example.test>": mail-from="sender@example.test": rcpt-to="a@clientfirm.test","b@clientfirm.test"
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1C0CC19: message-id=<wire@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1C0CC19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 klms a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1C0CC19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 klms b)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	e := eml.Email{From: "Sender <sender@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		r := find(res, rcpt)
+		if r.Outcome != DeliveredRemote || r.Match != MatchRecipientSet {
+			t.Fatalf("%s: KLMS-identified set should resolve via recipient_set, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
+		if !strings.Contains(r.Citation, "postfix/smtp") {
+			t.Fatalf("%s: citation must come from a delivery line, got %q", rcpt, r.Citation)
+		}
+	}
+}

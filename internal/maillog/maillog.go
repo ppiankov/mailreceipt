@@ -72,6 +72,18 @@ type Log struct {
 	// WO-33: lets a not_found distinguish "no trace at all" from "seen in the log but
 	// no delivery event recorded".
 	seenMsgIDs map[string]struct{}
+	// msgMeta records non-delivery scanner metadata (KLMS) keyed by normalized
+	// message-id: the envelope sender and the full recipient set the scanner saw.
+	// WO-42: used to IDENTIFY a message for recipient-set correlation when delivery
+	// events alone do not cover the set. It NEVER produces a delivery Event and its
+	// recipients are never cited as delivery evidence.
+	msgMeta map[string]msgMeta
+}
+
+// msgMeta is non-delivery scanner metadata for one message-id (WO-42).
+type msgMeta struct {
+	mailFrom   string
+	recipients []string // lowercased addresses the scanner recorded (rcpt-to)
 }
 
 // SawMessageID reports whether the message-id appeared anywhere in the log, even on
@@ -150,6 +162,10 @@ var (
 	// WO-42: the Postfix qmgr line logs the envelope sender as from=<addr>. The
 	// leading \b + "from=" avoids matching orig_to/other tokens.
 	mailFromRe = regexp.MustCompile(`\bfrom=<([^>]*)>`)
+	// WO-42: KLMS/scanner lines record mail-from="addr" and a quoted CSV rcpt-to.
+	klmsMailFromRe = regexp.MustCompile(`(?i)mail-from="([^"]*)"`)
+	klmsRcptToRe   = regexp.MustCompile(`(?i)rcpt-to=((?:"[^"]*",?)+)`)
+	klmsAddrRe     = regexp.MustCompile(`"([^"]*)"`)
 
 	// WO-34/WO-40: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda,
 	// or LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines
@@ -261,7 +277,7 @@ func Parse(r io.Reader, year int) Log {
 	if year == 0 {
 		year = 2026
 	}
-	l := Log{queueToMsg: map[string]string{}, queueToFrom: map[string]string{}, seenMsgIDs: map[string]struct{}{}}
+	l := Log{queueToMsg: map[string]string{}, queueToFrom: map[string]string{}, seenMsgIDs: map[string]struct{}{}, msgMeta: map[string]msgMeta{}}
 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -273,7 +289,12 @@ func Parse(r io.Reader, year int) Log {
 		// WO-33: record every message-id seen on ANY line (incl. non-postfix scanner
 		// lines) before filtering to postfix delivery lines.
 		if mid := anyMessageIDRe.FindStringSubmatch(line); mid != nil {
-			l.seenMsgIDs[strings.ToLower(strings.Trim(mid[1], "<>"))] = struct{}{}
+			normID := strings.ToLower(strings.Trim(mid[1], "<>"))
+			l.seenMsgIDs[normID] = struct{}{}
+			// WO-42: a scanner line (KLMS) carrying mail-from="..."/rcpt-to="..." is
+			// recipient-set IDENTIFICATION metadata, never a delivery. Record it so
+			// set correlation can identify a message-id's sender + recipient set.
+			recordScannerMeta(&l, normID, line)
 		}
 		m := lineRe.FindStringSubmatch(line)
 		if m == nil {
@@ -440,7 +461,7 @@ func eventCoversWant(e Event, want string) bool {
 // candidate is rejected (we cannot confirm the sender). If wantFrom is empty, the
 // sender is not constrained. Returns the events of the SINGLE qualifying candidate,
 // or nil when zero or more than one qualify (ambiguous — never guess).
-func (l Log) EventsForRecipientSet(want []string, wantFrom string, from, until time.Time) []Event {
+func (l Log) EventsForRecipientSet(want []string, wantFroms []string, from, until time.Time) []Event {
 	if len(want) == 0 {
 		return nil
 	}
@@ -454,7 +475,12 @@ func (l Log) EventsForRecipientSet(want []string, wantFrom string, from, until t
 	if len(wantList) == 0 {
 		return nil
 	}
-	wantFrom = strings.ToLower(strings.TrimSpace(wantFrom))
+	wantFromSet := map[string]bool{}
+	for _, w := range wantFroms {
+		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
+			wantFromSet[w] = true
+		}
+	}
 
 	// Group in-window delivery events by message-id (queue-id fallback).
 	byMsg := map[string][]Event{}
@@ -475,24 +501,20 @@ func (l Log) EventsForRecipientSet(want []string, wantFrom string, from, until t
 		byMsg[key] = append(byMsg[key], e)
 	}
 
-	// A candidate qualifies when its events cover every wanted address AND its
-	// sender matches (when constrained). Require exactly one qualifying candidate.
+	// A candidate qualifies when (a) its recipient set covers every wanted address —
+	// from its delivery events OR its KLMS/scanner metadata (identify-only) — and
+	// (b) its sender matches when constrained. Require exactly one qualifying
+	// candidate. Outcomes are always the delivery events; KLMS never delivers.
 	var matchKey string
 	matches := 0
 	for key, evs := range byMsg {
-		if !senderMatches(evs, wantFrom) {
+		meta := l.msgMeta[key] // zero value when absent; key may be "qid:..." (no meta)
+		if !senderMatchesCandidate(evs, meta, wantFromSet) {
 			continue
 		}
 		covered := true
 		for _, w := range wantList {
-			any := false
-			for _, e := range evs {
-				if eventCoversWant(e, w) {
-					any = true
-					break
-				}
-			}
-			if !any {
+			if !candidateCoversWant(evs, meta, w) {
 				covered = false
 				break
 			}
@@ -508,22 +530,70 @@ func (l Log) EventsForRecipientSet(want []string, wantFrom string, from, until t
 	return byMsg[matchKey]
 }
 
-// senderMatches reports whether a candidate message's events are consistent with
-// the wanted sender. WO-42: when wantFrom is set, at least one event must carry a
-// known MailFrom equal to it, and no event may carry a DIFFERENT known MailFrom.
-// A candidate with no known sender at all is rejected when wantFrom is set (we
-// cannot confirm it). When wantFrom is empty, the sender is unconstrained.
-func senderMatches(evs []Event, wantFrom string) bool {
-	if wantFrom == "" {
+// recordScannerMeta extracts sender + recipient-set metadata from a scanner (KLMS)
+// line and stores it under the message-id. WO-42: identification-only — this never
+// creates a delivery Event. Only lines that actually carry mail-from/rcpt-to are
+// recorded, so ordinary delivery/cleanup lines are unaffected.
+func recordScannerMeta(l *Log, normID, line string) {
+	mf := klmsMailFromRe.FindStringSubmatch(line)
+	rc := klmsRcptToRe.FindStringSubmatch(line)
+	if mf == nil && rc == nil {
+		return
+	}
+	meta := l.msgMeta[normID]
+	if mf != nil && meta.mailFrom == "" {
+		meta.mailFrom = strings.ToLower(strings.TrimSpace(mf[1]))
+	}
+	if rc != nil {
+		for _, a := range klmsAddrRe.FindAllStringSubmatch(rc[1], -1) {
+			addr := strings.ToLower(strings.TrimSpace(a[1]))
+			if addr != "" {
+				meta.recipients = append(meta.recipients, addr)
+			}
+		}
+	}
+	l.msgMeta[normID] = meta
+}
+
+// candidateCoversWant reports whether a candidate message covers a wanted address,
+// via a delivery event or its KLMS/scanner recipient metadata (identify-only).
+func candidateCoversWant(evs []Event, meta msgMeta, want string) bool {
+	for _, e := range evs {
+		if eventCoversWant(e, want) {
+			return true
+		}
+	}
+	want = strings.ToLower(strings.TrimSpace(want))
+	for _, r := range meta.recipients {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
+// senderMatchesCandidate reports whether a candidate's sender is consistent with
+// the wanted sender set. WO-42: the candidate's known sender is drawn from delivery
+// events' MailFrom and from KLMS mail-from metadata; it must equal one of wantFroms,
+// and no known sender may be outside wantFroms. A candidate with NO known sender is
+// rejected when wantFroms is non-empty (we cannot confirm it). When wantFroms is
+// empty, the sender is unconstrained.
+func senderMatchesCandidate(evs []Event, meta msgMeta, wantFroms map[string]bool) bool {
+	if len(wantFroms) == 0 {
 		return true
 	}
 	sawMatch := false
+	senders := []string{}
 	for _, e := range evs {
-		mf := strings.ToLower(strings.TrimSpace(e.MailFrom))
-		if mf == "" {
-			continue
+		if mf := strings.ToLower(strings.TrimSpace(e.MailFrom)); mf != "" {
+			senders = append(senders, mf)
 		}
-		if mf != wantFrom {
+	}
+	if mf := strings.ToLower(strings.TrimSpace(meta.mailFrom)); mf != "" {
+		senders = append(senders, mf)
+	}
+	for _, mf := range senders {
+		if !wantFroms[mf] {
 			return false
 		}
 		sawMatch = true

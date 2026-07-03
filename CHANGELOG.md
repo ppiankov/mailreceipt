@@ -20,7 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   attributed to a different sender's same-recipient-set message. If exactly one
   logged message covers the set with a matching sender, every recipient resolves
   from it — including recipients who also received unrelated mail in the window. If
-  zero or more than one match, the result stays `not_found` rather than guess.
+  zero or more than one match, the result stays `not_found` rather than guess. The
+  sender may match the forwarded `From` or `Sender` (send-on-behalf mail), and a
+  scanner (KLMS) line's `mail-from`/`rcpt-to` can identify the message's sender and
+  recipient set — but per-recipient outcomes always come from real delivery lines,
+  never the scanner line. When the forwarded sender is known and the message has
+  multiple recipients, delivery is attributed only after the sender is confirmed;
+  it never falls back to a sender-blind per-recipient window.
 - Recipients wrapped in encoded angle delimiters (e.g. `<=3Cname@host=3E>`) now
   decode correctly instead of being dropped as malformed.
 

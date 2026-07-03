@@ -1193,3 +1193,37 @@ Jun 19 15:00:02 mail01 postfix/smtp[901]: A1FFFF19: to=<b@clientfirm.test>, rela
 		t.Fatalf("expected recipient_set match:\n%s", decodedJSON)
 	}
 }
+
+// WO-42 rev-5: end-to-end — KLMS supplies the message-id's sender + recipient set,
+// delivery lines supply per-recipient outcomes, and a forward with a non-matching
+// Message-ID resolves every recipient via recipient_set through the filter flow.
+func TestFilterKLMSIdentifiedSetEndToEnd(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: a@clientfirm.test, b@clientfirm.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 19 Jun 2026 15:00:30 +0000\r\n" +
+		"Message-ID: <sentcopy@example.test>\r\n" +
+		"\r\nbody\r\n"
+	logBody := `Jun 19 15:00:00 mail01 KLMS: clean: message-id="<wire@example.test>": mail-from="sender@example.test": rcpt-to="a@clientfirm.test","b@clientfirm.test"
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1D0DD19: message-id=<wire@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1D0DD19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1D0DD19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 b)
+`
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, logBody)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if !strings.Contains(decodedJSON, `"recipient": "`+rcpt+`"`) {
+			t.Fatalf("missing recipient %q:\n%s", rcpt, decodedJSON)
+		}
+	}
+	if !strings.Contains(decodedJSON, `"match_method": "recipient_set"`) {
+		t.Fatalf("expected recipient_set match:\n%s", decodedJSON)
+	}
+}
