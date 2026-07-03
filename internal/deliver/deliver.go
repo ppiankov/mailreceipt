@@ -235,6 +235,15 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) Reci
 		from := e.Date.Add(-Window)
 		until := e.Date.Add(Window)
 		events = log.EventsForRecipient(rcpt, from, until)
+		// WO-41: the window can catch deliveries of DIFFERENT messages to the same
+		// recipient. Attribute only when the match is unambiguous — every matched
+		// event belongs to a single message (one queue-id). Multiple queue-ids mean
+		// we cannot tell which send is the forwarded one, so we refuse rather than
+		// guess (mirror, not oracle). Deferred-then-sent attempts of one message
+		// share a queue-id and remain a valid single match.
+		if len(events) > 0 && !singleQueueID(events) {
+			return notFoundResult(rcpt, e.MessageID, log)
+		}
 		if len(events) > 0 {
 			method = MatchRecipient
 		}
@@ -268,6 +277,25 @@ func notFoundResult(rcpt, messageID string, log maillog.Log) RecipientResult {
 		rr.Note = "message seen in the log, but no delivery event was recorded for this recipient"
 	}
 	return rr
+}
+
+// singleQueueID reports whether every event belongs to the same Postfix queue-id,
+// i.e. one message. WO-41: the recipient+date-window fallback may catch deliveries
+// of different messages to the same recipient; a single queue-id means the window
+// matched exactly one message (deferred-then-sent attempts of that message share
+// the id), so attribution is unambiguous. An empty queue-id (e.g. a Dovecot local
+// save) is treated as its own group, so a mix with empties is not unique.
+func singleQueueID(events []maillog.Event) bool {
+	if len(events) == 0 {
+		return false
+	}
+	first := events[0].QueueID
+	for _, ev := range events[1:] {
+		if ev.QueueID != first {
+			return false
+		}
+	}
+	return true
 }
 
 // chooseEvent selects the authoritative event: latest by time; if times tie or
