@@ -26,7 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   recipient set — but per-recipient outcomes always come from real delivery lines,
   never the scanner line. When the forwarded sender is known and the message has
   multiple recipients, delivery is attributed only after the sender is confirmed;
-  it never falls back to a sender-blind per-recipient window.
+  it never falls back to a sender-blind per-recipient window. The envelope sender is
+  read only from top-level MTA fields, never from a remote server's response text.
+  When a scanner line proves a recipient set that includes a locally-aliased mailbox,
+  a single unmatched recipient is allocated to a single unmatched Dovecot local-store
+  event under a strict one-to-one rule (any ambiguity stays `not_found`).
 - Recipients wrapped in encoded angle delimiters (e.g. `<=3Cname@host=3E>`) now
   decode correctly instead of being dropped as malformed.
 

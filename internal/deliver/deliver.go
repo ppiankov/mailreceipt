@@ -175,8 +175,12 @@ func Analyze(e eml.Email, log maillog.Log) Result {
 	// who also received unrelated mail in the window. Only engaged when no
 	// recipient correlates by Message-ID, and only on a unique set match.
 	if setEvents := setMatchEvents(e, recipients, log); setEvents != nil {
+		// WO-42: allocate a single KLMS-proved but unmatched local recipient to a
+		// single unmatched Dovecot local-store event (aliased mailbox), under a strict
+		// 1:1 uniqueness rule. Never guesses when more than one of either remains.
+		alloc := allocateAliasedLocal(recipients, setEvents, e, log)
 		for _, rcpt := range recipients {
-			res.Recipients = append(res.Recipients, resultFromEvents(rcpt, setEvents, MatchRecipientSet, e, log))
+			res.Recipients = append(res.Recipients, resultFromEvents(rcpt, setEvents, alloc, MatchRecipientSet, e, log))
 		}
 	} else {
 		// The per-recipient window fallback is safe only in narrow conditions:
@@ -414,7 +418,7 @@ func bareAddress(v string) string {
 // from one message, WO-42). It selects the events addressed to this recipient and
 // chooses the decisive one; if none in the pinned set match this recipient, it is
 // not found (the set covered the address via a different event form).
-func resultFromEvents(rcpt string, events []maillog.Event, method MatchMethod, e eml.Email, log maillog.Log) RecipientResult {
+func resultFromEvents(rcpt string, events []maillog.Event, alloc map[string]maillog.Event, method MatchMethod, e eml.Email, log maillog.Log) RecipientResult {
 	var mine []maillog.Event
 	for _, ev := range events {
 		if eventMatchesRecipient(ev, rcpt) {
@@ -422,7 +426,13 @@ func resultFromEvents(rcpt string, events []maillog.Event, method MatchMethod, e
 		}
 	}
 	if len(mine) == 0 {
-		return notFoundResult(rcpt, e.MessageID, log)
+		// WO-42: a KLMS-proved local recipient with no direct match may have been
+		// uniquely allocated to an aliased Dovecot local-store event.
+		if ev, ok := alloc[strings.ToLower(strings.TrimSpace(rcpt))]; ok {
+			mine = []maillog.Event{ev}
+		} else {
+			return notFoundResult(rcpt, e.MessageID, log)
+		}
 	}
 	chosen := chooseEvent(mine)
 	return RecipientResult{
@@ -434,6 +444,77 @@ func resultFromEvents(rcpt string, events []maillog.Event, method MatchMethod, e
 		Time:      chosen.Time,
 		Citation:  chosen.RawLine,
 	}
+}
+
+// allocateAliasedLocal maps a single KLMS-proved but otherwise-unmatched local
+// recipient to a single unmatched Dovecot local-store event, under a strict 1:1
+// uniqueness rule (WO-42). It returns rcpt -> event only when EXACTLY ONE wanted
+// recipient is unmatched by the candidate's delivery events AND EXACTLY ONE Dovecot
+// local-store event in the candidate is unmatched, AND that recipient is in the
+// candidate message's KLMS-recorded recipient set. Any ambiguity (more than one of
+// either) yields no allocation — the unmatched recipients stay not_found rather
+// than guess which mailbox is which.
+func allocateAliasedLocal(recipients []string, setEvents []maillog.Event, e eml.Email, log maillog.Log) map[string]maillog.Event {
+	// Unmatched wanted recipients (no covering delivery event).
+	var unmatchedRcpt []string
+	for _, rcpt := range recipients {
+		covered := false
+		for _, ev := range setEvents {
+			if eventMatchesRecipient(ev, rcpt) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			unmatchedRcpt = append(unmatchedRcpt, rcpt)
+		}
+	}
+	if len(unmatchedRcpt) != 1 {
+		return nil
+	}
+
+	// Unmatched Dovecot local-store events (delivered_local, matching no wanted rcpt).
+	var unmatchedDovecot []maillog.Event
+	for _, ev := range setEvents {
+		if ev.Daemon != "dovecot" {
+			continue
+		}
+		matchesAny := false
+		for _, rcpt := range recipients {
+			if eventMatchesRecipient(ev, rcpt) {
+				matchesAny = true
+				break
+			}
+		}
+		if !matchesAny {
+			unmatchedDovecot = append(unmatchedDovecot, ev)
+		}
+	}
+	if len(unmatchedDovecot) != 1 {
+		return nil
+	}
+
+	// The lone unmatched recipient must be KLMS-proved for the candidate message.
+	rcpt := strings.ToLower(strings.TrimSpace(unmatchedRcpt[0]))
+	proved := false
+	for _, ev := range setEvents {
+		if ev.MessageID == "" {
+			continue
+		}
+		for _, r := range log.ScannerRecipients(ev.MessageID) {
+			if strings.ToLower(strings.TrimSpace(r)) == rcpt {
+				proved = true
+				break
+			}
+		}
+		if proved {
+			break
+		}
+	}
+	if !proved {
+		return nil
+	}
+	return map[string]maillog.Event{rcpt: unmatchedDovecot[0]}
 }
 
 // notFoundResult builds a NotFound for a recipient. WO-33: if the message-id was

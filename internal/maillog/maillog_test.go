@@ -272,3 +272,20 @@ func TestKLMSExposesRecipientSetMetadata(t *testing.T) {
 		t.Fatalf("KLMS metadata must not surface as delivery events, got %d", len(got))
 	}
 }
+
+// WO-42 rev-6: a from=<...> inside the SMTP response text must NOT override the
+// authoritative qmgr envelope sender.
+func TestMailFromIgnoresResponseText(t *testing.T) {
+	log := Parse(strings.NewReader(`Jun 19 15:00:00 mail01 postfix/qmgr[900]: A1AAAA19: from=<sender@example.test>, size=1, nrcpt=1 (queue active)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1AAAA19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK relayed from=<bad@example.test> accepted)
+`), 2026)
+	if len(log.Events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(log.Events))
+	}
+	if log.Events[0].MailFrom != "sender@example.test" {
+		t.Fatalf("MailFrom must be the qmgr sender, got %q", log.Events[0].MailFrom)
+	}
+	if strings.Contains(log.Events[0].MailFrom, "bad@") {
+		t.Fatalf("response-text sender must never populate MailFrom")
+	}
+}

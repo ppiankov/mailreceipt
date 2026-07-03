@@ -600,3 +600,79 @@ Jun 19 15:00:02 mail01 postfix/smtp[901]: A1C0CC19: to=<b@clientfirm.test>, rela
 		}
 	}
 }
+
+// WO-42 rev-6: response-text from=<bad@> cannot satisfy sender confirmation. A
+// forwarded sender matching only the response text stays not_found; matching the
+// qmgr sender resolves.
+func TestRecipientSetMatchSenderFromResponseTextRejected(t *testing.T) {
+	log := parseLog(t, `Jun 19 15:00:00 mail01 postfix/qmgr[900]: A1C1CC19: from=<sender@example.test>, size=1, nrcpt=2 (queue active)
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1C1CC19: message-id=<wire@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1C1CC19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK from=<bad@example.test> ok)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1C1CC19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK from=<bad@example.test> ok)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	// Forwarded sender is the response-text address only -> must NOT confirm.
+	eBad := eml.Email{From: "Bad <bad@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	for _, r := range Analyze(eBad, log).Recipients {
+		if r.Outcome != NotFound {
+			t.Fatalf("response-text sender must not confirm, got %s for %s", r.Outcome, r.Recipient)
+		}
+	}
+	// Forwarded sender is the real qmgr sender -> resolves.
+	eGood := eml.Email{From: "Sender <sender@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	for _, r := range Analyze(eGood, log).Recipients {
+		if r.Outcome != DeliveredRemote || r.Match != MatchRecipientSet {
+			t.Fatalf("qmgr sender should resolve, got %s (match=%s) for %s", r.Outcome, r.Match, r.Recipient)
+		}
+	}
+}
+
+// WO-42 rev-6: a KLMS-proved local recipient with an aliased Dovecot mailbox (no
+// local-part/OrigTo match) is allocated to the unmatched Dovecot local-store event
+// under the strict 1:1 rule; its citation is the Dovecot line, not KLMS.
+func TestRecipientSetMatchKLMSDovecotAliasAllocation(t *testing.T) {
+	log := parseLog(t, `Jun 19 15:00:00 mail01 KLMS: clean: message-id="<wire@example.test>": mail-from="sender@example.test": rcpt-to="remote@clientfirm.test","local@example.test"
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1D1DD19: message-id=<wire@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1D1DD19: to=<remote@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 remote)
+Jun 19 15:00:03 mail01 dovecot: lda(aliasbox)<999><s>: sieve: msgid=<wire@example.test>: stored mail into mailbox 'INBOX'
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	e := eml.Email{From: "Sender <sender@example.test>", To: []string{"remote@clientfirm.test", "local@example.test"}, Date: date}
+	res := Analyze(e, log)
+	remote := find(res, "remote@clientfirm.test")
+	if remote.Outcome != DeliveredRemote || remote.Match != MatchRecipientSet {
+		t.Fatalf("remote: want delivered_remote/recipient_set, got %s (%s)", remote.Outcome, remote.Match)
+	}
+	local := find(res, "local@example.test")
+	if local.Outcome != DeliveredLocal || local.Match != MatchRecipientSet {
+		t.Fatalf("local: want delivered_local/recipient_set, got %s (%s)", local.Outcome, local.Match)
+	}
+	if !strings.Contains(local.Citation, "dovecot") {
+		t.Fatalf("local citation must be the Dovecot line, got %q", local.Citation)
+	}
+	if strings.Contains(local.Citation, "KLMS") {
+		t.Fatalf("local citation must never be the KLMS line")
+	}
+}
+
+// WO-42 rev-6: the KLMS->Dovecot allocation is strictly 1:1. Two unmatched local
+// recipients and two unmatched Dovecot events stay not_found (never guess).
+func TestRecipientSetMatchDovecotAllocationAmbiguousStaysNotFound(t *testing.T) {
+	log := parseLog(t, `Jun 19 15:00:00 mail01 KLMS: clean: message-id="<wire@example.test>": mail-from="sender@example.test": rcpt-to="remote@clientfirm.test","local1@example.test","local2@example.test"
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1E1EE19: message-id=<wire@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1E1EE19: to=<remote@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 remote)
+Jun 19 15:00:03 mail01 dovecot: lda(aliasbox1)<998><s>: sieve: msgid=<wire@example.test>: stored mail into mailbox 'INBOX'
+Jun 19 15:00:04 mail01 dovecot: lda(aliasbox2)<999><s>: sieve: msgid=<wire@example.test>: stored mail into mailbox 'INBOX'
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	e := eml.Email{From: "Sender <sender@example.test>", To: []string{"remote@clientfirm.test", "local1@example.test", "local2@example.test"}, Date: date}
+	res := Analyze(e, log)
+	if find(res, "remote@clientfirm.test").Outcome != DeliveredRemote {
+		t.Fatalf("remote should still resolve")
+	}
+	for _, rcpt := range []string{"local1@example.test", "local2@example.test"} {
+		if find(res, rcpt).Outcome != NotFound {
+			t.Fatalf("%s: ambiguous 2:2 allocation must stay not_found", rcpt)
+		}
+	}
+}

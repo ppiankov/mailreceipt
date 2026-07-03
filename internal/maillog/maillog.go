@@ -345,7 +345,12 @@ func Parse(r io.Reader, year int) Log {
 		if ot := origToRe.FindStringSubmatch(rest); ot != nil {
 			ev.OrigTo = strings.ToLower(strings.TrimSpace(ot[1]))
 		}
-		if fr := mailFromRe.FindStringSubmatch(rest); fr != nil {
+		// WO-42: the envelope sender is a top-level MTA field. A remote server's
+		// response text (inside status=(...)) can contain "from=<...>" prose that is
+		// NOT authoritative — scan only the portion before status= so a response
+		// cannot poison MailFrom. The qmgr line remains the primary sender source
+		// (backfilled below); this direct capture handles the rare top-level form.
+		if fr := mailFromRe.FindStringSubmatch(preStatus(rest)); fr != nil {
 			ev.MailFrom = strings.ToLower(strings.TrimSpace(fr[1]))
 		}
 		if rl := relayRe.FindStringSubmatch(rest); rl != nil {
@@ -528,6 +533,26 @@ func (l Log) EventsForRecipientSet(want []string, wantFroms []string, from, unti
 		return nil
 	}
 	return byMsg[matchKey]
+}
+
+// ScannerRecipients returns the recipient set a scanner (KLMS) line recorded for a
+// message-id, or nil. WO-42: identify-only metadata; never delivery evidence.
+func (l Log) ScannerRecipients(messageID string) []string {
+	m, ok := l.msgMeta[strings.ToLower(strings.Trim(strings.TrimSpace(messageID), "<>"))]
+	if !ok {
+		return nil
+	}
+	return m.recipients
+}
+
+// preStatus returns the portion of a delivery-line remainder before "status=",
+// i.e. the top-level MTA fields, excluding the remote server's response text.
+// WO-42: used to keep response prose from being parsed as an authoritative field.
+func preStatus(rest string) string {
+	if i := strings.Index(rest, "status="); i >= 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 // recordScannerMeta extracts sender + recipient-set metadata from a scanner (KLMS)
