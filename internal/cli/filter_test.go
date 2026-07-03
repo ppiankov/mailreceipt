@@ -593,6 +593,32 @@ func TestFilterQuotedPrintableAngleRecipientIsDelivered(t *testing.T) {
 	}
 }
 
+// WO-37: nested QP angle delimiters must decode before raw-token fallback so
+// the delivered recipient, not a literal =3C-prefixed artifact, is correlated.
+func TestFilterNestedQuotedPrintableAngleRecipientIsDelivered(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("qp-angle@example.test", "<=3Cjohn@example.test=3E> trailing text",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterQPAngleRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "john@example.test"`) {
+		t.Fatalf("filter JSON missing decoded nested recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "3cjohn@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "=3cjohn@example.test"`) {
+		t.Fatalf("filter must not use raw nested delimiter artifact:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("decoded nested recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
 // WO-38: filter can search a rotated gzip log via glob, not only current mail.log.
 func TestFilterSearchesRotatedGzipLogGlob(t *testing.T) {
 	cfg := `receipt_filter:

@@ -204,6 +204,28 @@ body
 	}
 }
 
+// WO-37: an encoded angle-delimiter pair nested inside raw angle brackets is
+// still a delimiter artifact, not a literal =3C-prefixed local-part.
+func TestParseNestedQuotedPrintableAngleRecipient(t *testing.T) {
+	raw := `From: Sender <sender@example.test>
+To: <=3Cjohn@example.test=3E> trailing text
+Subject: Filing
+Date: Fri, 5 Jun 2026 15:09:00 +0000
+Message-ID: <nested-qp-angle@example.test>
+
+body
+`
+	e, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.Recipients()
+	want := []string{"john@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients: want %v, got %v", want, got)
+	}
+}
+
 // WO-37: lenient pasted blocks need the same folded-header recovery as RFC822.
 func TestParseLenientFoldedOutlookRecipients(t *testing.T) {
 	raw := `From: Sender <sender@example.test>

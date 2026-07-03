@@ -352,13 +352,10 @@ func scanAddressTokens(v string) []string {
 	return out
 }
 
-// WO-37: skip the raw token only when it is visibly the left half of an encoded
-// angle-delimiter pair, not just because a valid local-part begins with =HH.
+// WO-37: skip the raw token only when it is visibly wrapped in encoded angle
+// delimiters, not just because a valid local-part begins with =HH.
 func isEncodedAddressDelimiterArtifact(v string, start, end int) bool {
 	if start < 0 || end > len(v) || start >= end {
-		return false
-	}
-	if start > 0 && v[start-1] == '<' {
 		return false
 	}
 	if !startsWithStructuralAddressQPEscape(v[start:end]) {
