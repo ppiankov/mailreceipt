@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Forwarded messages now correlate by recipient set when the Message-ID does not
+  match the log. Outlook's forward-as-attachment strips the original Message-ID,
+  and Exchange rewrites it between the Sent-folder copy and the transmitted
+  message — so correlating by Message-ID alone reported `not_found` even when the
+  message was delivered. When the Message-ID does not correlate (absent or
+  present-but-unmatched) and a send `Date` is available, delivery is now matched
+  by the full recipient set within the date window: if exactly one logged message
+  covers the set, every recipient resolves from it — including recipients who also
+  received unrelated mail in the window. If more than one message covers the set,
+  the result stays `not_found` rather than guess.
+- Recipients wrapped in encoded angle delimiters (e.g. `<=3Cname@host=3E>`) now
+  decode correctly instead of being dropped as malformed.
+
 ## [0.6.2] - 2026-07-03
 
 ### Fixed

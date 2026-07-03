@@ -468,8 +468,11 @@ func TestFilterStrippedMessageIDUniqueWindowMatchResolves(t *testing.T) {
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
 		t.Fatalf("unique window match should resolve to delivered_remote:\n%s", decodedJSON)
 	}
-	if !strings.Contains(decodedJSON, `"match_method": "recipient_window"`) {
-		t.Fatalf("expected recipient_window match method:\n%s", decodedJSON)
+	// WO-42: a unique recipient-set match (recipient_set) or the per-recipient
+	// window (recipient_window) are both valid no-Message-ID resolutions.
+	if !strings.Contains(decodedJSON, `"match_method": "recipient_set"`) &&
+		!strings.Contains(decodedJSON, `"match_method": "recipient_window"`) {
+		t.Fatalf("expected a recipient-based match method:\n%s", decodedJSON)
 	}
 }
 

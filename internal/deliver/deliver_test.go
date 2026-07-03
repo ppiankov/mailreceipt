@@ -110,8 +110,11 @@ func TestRecipientFallbackWhenNoMessageID(t *testing.T) {
 	if jdoe.Outcome != DeliveredRemote {
 		t.Fatalf("fallback match: want delivered, got %s", jdoe.Outcome)
 	}
-	if jdoe.Match != MatchRecipient {
-		t.Fatalf("want recipient_window match, got %s", jdoe.Match)
+	// WO-42: a no-Message-ID recipient may resolve via the recipient-set match
+	// (unique queue-id) or the per-recipient window; both are recipient-based
+	// fallbacks, not a Message-ID match.
+	if jdoe.Match != MatchRecipient && jdoe.Match != MatchRecipientSet {
+		t.Fatalf("want a recipient-based fallback match, got %s", jdoe.Match)
 	}
 }
 
@@ -391,5 +394,68 @@ func TestAliasDeliveryCorrelatesViaOrigTo(t *testing.T) {
 	}
 	if strings.Contains(res.Caveat, "accepted the message (SMTP 2xx)") {
 		t.Fatalf("local maildrop delivery must not affirm SMTP 2xx: %s", res.Caveat)
+	}
+}
+
+// WO-42: a forwarded message whose Message-ID was STRIPPED (Outlook) resolves all
+// recipients via a unique recipient-SET match, including recipients who also
+// received unrelated mail in the window (which per-recipient uniqueness rejects).
+func TestRecipientSetMatchStrippedMessageID(t *testing.T) {
+	// multi-recipient send: queue Q2 delivers to all three; alice ALSO got another
+	// message (QOTHER) the same day, which would defeat per-recipient uniqueness.
+	log := parseLog(t, `Jun 19 15:49:30 mail01 postfix/smtp[5001]: AAAA0019: to=<alice@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK other)
+Jun 19 14:50:08 mail01 postfix/smtp[5002]: BBBB0019: to=<alice@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK set)
+Jun 19 14:50:08 mail01 postfix/smtp[5002]: BBBB0019: to=<bob@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK set)
+Jun 19 14:50:08 mail01 postfix/smtp[5002]: BBBB0019: to=<carol@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK set)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:49:35 +0000")
+	e := eml.Email{To: []string{"alice@clientfirm.test", "bob@clientfirm.test", "carol@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"alice@clientfirm.test", "bob@clientfirm.test", "carol@clientfirm.test"} {
+		r := find(res, rcpt)
+		if r.Outcome != DeliveredRemote {
+			t.Fatalf("%s: want delivered_remote via set match, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
+		if r.Match != MatchRecipientSet {
+			t.Fatalf("%s: want recipient_set match, got %s", rcpt, r.Match)
+		}
+	}
+}
+
+// WO-42: a forwarded message whose Message-ID is PRESENT but matches no log event
+// (Exchange rewrites the id between the Sent copy and the wire) still resolves via
+// the recipient-set match — set-match engages when the id fails to correlate.
+func TestRecipientSetMatchRewrittenMessageID(t *testing.T) {
+	log := parseLog(t, `Jul  2 17:33:15 mail01 postfix/cleanup[6000]: CCCC0002: message-id=<onwire-id@example.test>
+Jul  2 17:33:16 mail01 postfix/smtp[6001]: CCCC0002: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK a)
+Jul  2 17:33:16 mail01 postfix/smtp[6001]: CCCC0002: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK b)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Thu, 02 Jul 2026 17:33:00 +0000")
+	// The forwarded copy carries a DIFFERENT id than the wire (Exchange rewrite).
+	e := eml.Email{MessageID: "sentcopy-id@example.test", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		r := find(res, rcpt)
+		if r.Outcome != DeliveredRemote || r.Match != MatchRecipientSet {
+			t.Fatalf("%s: want delivered_remote via recipient_set, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
+	}
+}
+
+// WO-42: when TWO different messages in the window both cover the recipient set,
+// the match is ambiguous and every recipient stays not_found (never guess).
+func TestRecipientSetMatchAmbiguousStaysNotFound(t *testing.T) {
+	log := parseLog(t, `Jun 19 14:00:00 mail01 postfix/smtp[7001]: DDDD0019: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 first a)
+Jun 19 14:00:00 mail01 postfix/smtp[7001]: DDDD0019: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 first b)
+Jun 19 16:00:00 mail01 postfix/smtp[7002]: EEEE0019: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 second a)
+Jun 19 16:00:00 mail01 postfix/smtp[7002]: EEEE0019: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 second b)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:00 +0000")
+	e := eml.Email{To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if r := find(res, rcpt); r.Outcome != NotFound {
+			t.Fatalf("%s: ambiguous set (two messages) must stay not_found, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
 	}
 }

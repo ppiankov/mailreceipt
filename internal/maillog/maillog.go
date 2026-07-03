@@ -373,6 +373,69 @@ func (l Log) EventsForRecipient(addr string, from, until time.Time) []Event {
 	return out
 }
 
+// EventsForRecipientSet finds the delivery events of the single logged message
+// whose recipient set covers every address in want, within the window. WO-42:
+// when the forwarded copy's Message-ID does not match the log (Outlook strips it,
+// Exchange rewrites it), the full recipient SET is a strong join key. A logged
+// message is one queue-id; its recipient set is the To/OrigTo values across its
+// events. If exactly one queue-id in the window covers all of want, its events
+// are returned. If zero or MORE THAN ONE cover the set, nil is returned — the
+// match is ambiguous and must not be guessed (mirror, not oracle).
+func (l Log) EventsForRecipientSet(want []string, from, until time.Time) []Event {
+	if len(want) == 0 {
+		return nil
+	}
+	wantSet := map[string]bool{}
+	for _, w := range want {
+		w = strings.ToLower(strings.TrimSpace(w))
+		if w != "" {
+			wantSet[w] = true
+		}
+	}
+	if len(wantSet) == 0 {
+		return nil
+	}
+
+	// Group in-window events by queue-id; track which wanted addresses each covers.
+	byQueue := map[string][]Event{}
+	covers := map[string]map[string]bool{}
+	for _, e := range l.Events {
+		if e.QueueID == "" {
+			continue
+		}
+		if !from.IsZero() && !e.Time.IsZero() && e.Time.Before(from) {
+			continue
+		}
+		if !until.IsZero() && !e.Time.IsZero() && e.Time.After(until) {
+			continue
+		}
+		byQueue[e.QueueID] = append(byQueue[e.QueueID], e)
+		for _, cand := range []string{e.To, e.OrigTo} {
+			cand = strings.ToLower(strings.TrimSpace(cand))
+			if wantSet[cand] {
+				if covers[e.QueueID] == nil {
+					covers[e.QueueID] = map[string]bool{}
+				}
+				covers[e.QueueID][cand] = true
+			}
+		}
+	}
+
+	// A queue-id qualifies when it covers every wanted address. Require exactly one.
+	var matchQueue string
+	matches := 0
+	for qid, c := range covers {
+		if len(c) == len(wantSet) {
+			matches++
+			matchQueue = qid
+		}
+	}
+	if matches != 1 {
+		return nil
+	}
+	return byQueue[matchQueue]
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

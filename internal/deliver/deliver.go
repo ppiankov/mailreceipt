@@ -68,9 +68,10 @@ func (o Outcome) IsDelivered() bool {
 type MatchMethod string
 
 const (
-	MatchMessageID MatchMethod = "message_id"
-	MatchRecipient MatchMethod = "recipient_window"
-	MatchNone      MatchMethod = "none"
+	MatchMessageID    MatchMethod = "message_id"
+	MatchRecipient    MatchMethod = "recipient_window"
+	MatchRecipientSet MatchMethod = "recipient_set"
+	MatchNone         MatchMethod = "none"
 )
 
 // RecipientResult is the cited outcome for one recipient.
@@ -163,8 +164,23 @@ func Analyze(e eml.Email, log maillog.Log) Result {
 
 	recipients := e.Recipients()
 	sole := len(recipients) == 1
-	for _, rcpt := range recipients {
-		res.Recipients = append(res.Recipients, analyzeRecipient(e, rcpt, log, sole))
+
+	// WO-42: when the forwarded copy's Message-ID does not correlate (Outlook
+	// strips it, Exchange rewrites it between the Sent copy and the wire), try to
+	// pin the message by its full recipient SET before falling to per-recipient
+	// windows. If the set uniquely identifies one logged message (one queue-id) in
+	// the window, attribute every recipient from that message's events. This is
+	// strictly more precise than per-recipient matching and resolves recipients
+	// who also received unrelated mail in the window. Only engaged when no
+	// recipient correlates by Message-ID, and only on a unique set match.
+	if setEvents := setMatchEvents(e, recipients, log); setEvents != nil {
+		for _, rcpt := range recipients {
+			res.Recipients = append(res.Recipients, resultFromEvents(rcpt, setEvents, MatchRecipientSet, e, log))
+		}
+	} else {
+		for _, rcpt := range recipients {
+			res.Recipients = append(res.Recipients, analyzeRecipient(e, rcpt, log, sole))
+		}
 	}
 	// Stable order for deterministic output/tests.
 	sort.Slice(res.Recipients, func(i, j int) bool {
@@ -257,6 +273,52 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) Reci
 	// a later attempt supersedes an earlier one (deferred -> later sent), and
 	// among same-time events a terminal status wins over deferred.
 	chosen := chooseEvent(events)
+	return RecipientResult{
+		Recipient: rcpt,
+		Outcome:   outcomeFor(chosen),
+		Match:     method,
+		Relay:     chosen.Relay,
+		Response:  chosen.Response,
+		Time:      chosen.Time,
+		Citation:  chosen.RawLine,
+	}
+}
+
+// setMatchEvents returns the events of the single logged message whose recipient
+// set matches the forwarded message's, or nil. WO-42: it engages only when the
+// Message-ID does not correlate for ANY recipient (absent, or present but
+// matching no log event — Exchange rewrites the id), and a send Date is present
+// to bound the window. A nil result means "no unique set match" and the caller
+// falls back to per-recipient analysis.
+func setMatchEvents(e eml.Email, recipients []string, log maillog.Log) []maillog.Event {
+	if e.Date.IsZero() || len(recipients) == 0 {
+		return nil
+	}
+	// If the Message-ID already correlates to any delivery, the exact-id path is
+	// authoritative; do not override it with a set guess.
+	if e.MessageID != "" && len(log.EventsForMessageID(e.MessageID)) > 0 {
+		return nil
+	}
+	from := e.Date.Add(-Window)
+	until := e.Date.Add(Window)
+	return log.EventsForRecipientSet(recipients, from, until)
+}
+
+// resultFromEvents builds a recipient's result from a pinned set of events (all
+// from one message, WO-42). It selects the events addressed to this recipient and
+// chooses the decisive one; if none in the pinned set match this recipient, it is
+// not found (the set covered the address via a different event form).
+func resultFromEvents(rcpt string, events []maillog.Event, method MatchMethod, e eml.Email, log maillog.Log) RecipientResult {
+	var mine []maillog.Event
+	for _, ev := range events {
+		if eventMatchesRecipient(ev, rcpt) {
+			mine = append(mine, ev)
+		}
+	}
+	if len(mine) == 0 {
+		return notFoundResult(rcpt, e.MessageID, log)
+	}
+	chosen := chooseEvent(mine)
 	return RecipientResult{
 		Recipient: rcpt,
 		Outcome:   outcomeFor(chosen),
