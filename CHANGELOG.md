@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-03
+
 ### Fixed
 - Receipts now resolve for messages forwarded as an attachment from Outlook.
   Outlook's "forward as attachment" strips the original message's `Message-ID`
