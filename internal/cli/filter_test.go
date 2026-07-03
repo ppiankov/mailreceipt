@@ -1160,3 +1160,36 @@ func TestFilterDedupOffByDefaultEmitsEachTime(t *testing.T) {
 		t.Fatalf("without dedup, second invocation must still emit")
 	}
 }
+
+// WO-42: end-to-end — a forwarded message with a non-matching Message-ID resolves
+// its recipient via the recipient-set match through the full filter flow.
+func TestFilterRecipientSetMatchEndToEnd(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: a@clientfirm.test, b@clientfirm.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 19 Jun 2026 15:00:30 +0000\r\n" +
+		"Message-ID: <sentcopy-id@example.test>\r\n" +
+		"\r\nbody\r\n"
+	logBody := `Jun 19 15:00:00 mail01 postfix/qmgr[900]: A1FFFF19: from=<sender@example.test>, size=1, nrcpt=2 (queue active)
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1FFFF19: message-id=<wire-id@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1FFFF19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1FFFF19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK b)
+`
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, logBody)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if !strings.Contains(decodedJSON, `"recipient": "`+rcpt+`"`) {
+			t.Fatalf("missing recipient %q:\n%s", rcpt, decodedJSON)
+		}
+	}
+	if !strings.Contains(decodedJSON, `"match_method": "recipient_set"`) {
+		t.Fatalf("expected recipient_set match:\n%s", decodedJSON)
+	}
+}

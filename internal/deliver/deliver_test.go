@@ -459,3 +459,75 @@ Jun 19 16:00:00 mail01 postfix/smtp[7002]: EEEE0019: to=<b@clientfirm.test>, rel
 		}
 	}
 }
+
+// WO-42 rev: a mixed-transport message (remote SMTP + local Dovecot) whose
+// Message-ID does not match the forward resolves ALL recipients — including the
+// local one — via a unique recipient-set match keyed on message-id, not queue-id.
+func TestRecipientSetMatchMixedRemoteAndDovecot(t *testing.T) {
+	log := parseLog(t, `Jul  2 17:33:14 mail01 postfix/qmgr[900]: A1AAAA02: from=<sender@example.test>, size=1000, nrcpt=3 (queue active)
+Jul  2 17:33:15 mail01 postfix/cleanup[6000]: A1AAAA02: message-id=<wire@example.test>
+Jul  2 17:33:16 mail01 postfix/smtp[6001]: A1AAAA02: to=<remote1@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK)
+Jul  2 17:33:16 mail01 postfix/smtp[6001]: A1AAAA02: to=<remote2@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK)
+Jul  2 17:33:17 mail01 dovecot: lda(localuser)<999><sess>: sieve: msgid=<wire@example.test>: stored mail into mailbox 'INBOX'
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Thu, 02 Jul 2026 17:33:00 +0000")
+	e := eml.Email{From: "Sender <sender@example.test>", To: []string{"remote1@clientfirm.test", "remote2@clientfirm.test", "localuser@example.test"}, Date: date}
+	res := Analyze(e, log)
+	want := map[string]Outcome{
+		"remote1@clientfirm.test": DeliveredRemote,
+		"remote2@clientfirm.test": DeliveredRemote,
+		"localuser@example.test":  DeliveredLocal,
+	}
+	for rcpt, wantOutcome := range want {
+		r := find(res, rcpt)
+		if r.Outcome != wantOutcome || r.Match != MatchRecipientSet {
+			t.Fatalf("%s: want %s via recipient_set, got %s (match=%s)", rcpt, wantOutcome, r.Outcome, r.Match)
+		}
+	}
+}
+
+// WO-42 rev: two messages in the window cover the same recipient set but were sent
+// by DIFFERENT senders; only the candidate whose sender matches the forwarded
+// From may resolve. The other must not be attributed.
+func TestRecipientSetMatchSenderDisambiguates(t *testing.T) {
+	log := parseLog(t, `Jun 19 14:00:00 mail01 postfix/qmgr[900]: A1BBBB19: from=<other@example.test>, size=1, nrcpt=2 (queue active)
+Jun 19 14:00:01 mail01 postfix/cleanup[900]: A1BBBB19: message-id=<other-msg@example.test>
+Jun 19 14:00:02 mail01 postfix/smtp[901]: A1BBBB19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 other a)
+Jun 19 14:00:02 mail01 postfix/smtp[901]: A1BBBB19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 other b)
+Jun 19 15:00:00 mail01 postfix/qmgr[900]: A1CCCC19: from=<sender@example.test>, size=1, nrcpt=2 (queue active)
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1CCCC19: message-id=<mine-msg@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[902]: A1CCCC19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 mine a)
+Jun 19 15:00:02 mail01 postfix/smtp[902]: A1CCCC19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 mine b)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	e := eml.Email{From: "Sender <sender@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		r := find(res, rcpt)
+		if r.Outcome != DeliveredRemote || r.Match != MatchRecipientSet {
+			t.Fatalf("%s: sender-matched candidate should resolve, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
+		// Must be attributed to the sender's message (250 mine ...), not the other.
+		if !strings.Contains(r.Response, "mine") {
+			t.Fatalf("%s: attributed to wrong sender's message: %q", rcpt, r.Response)
+		}
+	}
+}
+
+// WO-42 rev: the only recipient-set candidate in the window was sent by a
+// DIFFERENT sender than the forwarded message; it must not be attributed.
+func TestRecipientSetMatchWrongSenderNotAttributed(t *testing.T) {
+	log := parseLog(t, `Jun 19 15:00:00 mail01 postfix/qmgr[900]: A1DDDD19: from=<other@example.test>, size=1, nrcpt=2 (queue active)
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1DDDD19: message-id=<other-msg@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1DDDD19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 other a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1DDDD19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 other b)
+`)
+	date, _ := time.Parse(time.RFC1123Z, "Fri, 19 Jun 2026 15:00:30 +0000")
+	e := eml.Email{From: "Sender <sender@example.test>", To: []string{"a@clientfirm.test", "b@clientfirm.test"}, Date: date}
+	res := Analyze(e, log)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if r := find(res, rcpt); r.Outcome != NotFound {
+			t.Fatalf("%s: wrong-sender candidate must not be attributed, got %s (match=%s)", rcpt, r.Outcome, r.Match)
+		}
+	}
+}

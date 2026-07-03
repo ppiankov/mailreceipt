@@ -13,11 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and Exchange rewrites it between the Sent-folder copy and the transmitted
   message — so correlating by Message-ID alone reported `not_found` even when the
   message was delivered. When the Message-ID does not correlate (absent or
-  present-but-unmatched) and a send `Date` is available, delivery is now matched
-  by the full recipient set within the date window: if exactly one logged message
-  covers the set, every recipient resolves from it — including recipients who also
-  received unrelated mail in the window. If more than one message covers the set,
-  the result stays `not_found` rather than guess.
+  present-but-unmatched) and a send `Date` is available, delivery is matched by the
+  full recipient set within the date window: candidates are grouped by message-id
+  so a mixed message (some recipients delivered remotely, others stored locally by
+  Dovecot) is one candidate, and the envelope sender must match so a send is never
+  attributed to a different sender's same-recipient-set message. If exactly one
+  logged message covers the set with a matching sender, every recipient resolves
+  from it — including recipients who also received unrelated mail in the window. If
+  zero or more than one match, the result stays `not_found` rather than guess.
 - Recipients wrapped in encoded angle delimiters (e.g. `<=3Cname@host=3E>`) now
   decode correctly instead of being dropped as malformed.
 

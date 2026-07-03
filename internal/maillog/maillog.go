@@ -42,7 +42,12 @@ type Event struct {
 	// (postfix/local writes "to=<mailbox>, orig_to=<address>"). WO-35: this is the
 	// in-log alias bridge — it lets a delivery to an alias-target mailbox correlate
 	// to the address the message was actually sent to, with no /etc/aliases parsing.
-	OrigTo   string    `json:"orig_to,omitempty"`
+	OrigTo string `json:"orig_to,omitempty"`
+	// MailFrom is the envelope sender (from=<...>), when Postfix logs it. WO-42:
+	// the sender is part of the recipient-set correlation key so a forwarded message
+	// is never attributed to a different sender's message that happens to share the
+	// same recipient set and date.
+	MailFrom string    `json:"mail_from,omitempty"`
 	Relay    string    `json:"relay,omitempty"`
 	Daemon   string    `json:"daemon,omitempty"` // postfix delivery agent: smtp, lmtp, pipe, local, virtual
 	Status   Status    `json:"status"`
@@ -58,9 +63,10 @@ type Event struct {
 type Log struct {
 	Events           []Event
 	queueToMsg       map[string]string
-	coverageFirst    time.Time // WO-38: earliest timestamp seen in any decoded log line.
-	coverageLast     time.Time // WO-38: latest timestamp seen in any decoded log line.
-	coverageFirstRaw string    // WO-38: raw timestamp form used for doctor timestamp diagnostics.
+	queueToFrom      map[string]string // WO-42: queue-id → envelope sender, from the qmgr line.
+	coverageFirst    time.Time         // WO-38: earliest timestamp seen in any decoded log line.
+	coverageLast     time.Time         // WO-38: latest timestamp seen in any decoded log line.
+	coverageFirstRaw string            // WO-38: raw timestamp form used for doctor timestamp diagnostics.
 	// seenMsgIDs records every message-id observed in ANY log line (postfix delivery
 	// lines AND non-delivery lines such as antivirus/scanner records), lowercased.
 	// WO-33: lets a not_found distinguish "no trace at all" from "seen in the log but
@@ -141,6 +147,9 @@ var (
 	anyMessageIDRe = regexp.MustCompile(`(?i)message-id=["']?<?([^>"'\s,]+)>?`)
 	toRe           = regexp.MustCompile(`\bto=<([^>]*)>`)
 	origToRe       = regexp.MustCompile(`\borig_to=<([^>]*)>`)
+	// WO-42: the Postfix qmgr line logs the envelope sender as from=<addr>. The
+	// leading \b + "from=" avoids matching orig_to/other tokens.
+	mailFromRe = regexp.MustCompile(`\bfrom=<([^>]*)>`)
 
 	// WO-34/WO-40: Dovecot delivers local mail (Postfix mailbox_command=dovecot-lda,
 	// or LMTP) and logs under the "dovecot" tag, not postfix/<daemon>. These lines
@@ -252,7 +261,7 @@ func Parse(r io.Reader, year int) Log {
 	if year == 0 {
 		year = 2026
 	}
-	l := Log{queueToMsg: map[string]string{}, seenMsgIDs: map[string]struct{}{}}
+	l := Log{queueToMsg: map[string]string{}, queueToFrom: map[string]string{}, seenMsgIDs: map[string]struct{}{}}
 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -285,6 +294,15 @@ func Parse(r io.Reader, year int) Log {
 			}
 		}
 
+		// WO-42: the qmgr line ("QID: from=<sender>, size=..., nrcpt=...") carries
+		// the envelope sender but no status=. Record queue-id -> sender so delivery
+		// events can be backfilled with it for sender-aware set correlation.
+		if !strings.Contains(rest, "status=") {
+			if fr := mailFromRe.FindStringSubmatch(rest); fr != nil {
+				l.queueToFrom[qid] = strings.ToLower(strings.TrimSpace(fr[1]))
+			}
+		}
+
 		// delivery line: needs a status= to be an Event.
 		st := statusRe.FindStringSubmatch(rest)
 		if st == nil {
@@ -306,6 +324,9 @@ func Parse(r io.Reader, year int) Log {
 		if ot := origToRe.FindStringSubmatch(rest); ot != nil {
 			ev.OrigTo = strings.ToLower(strings.TrimSpace(ot[1]))
 		}
+		if fr := mailFromRe.FindStringSubmatch(rest); fr != nil {
+			ev.MailFrom = strings.ToLower(strings.TrimSpace(fr[1]))
+		}
 		if rl := relayRe.FindStringSubmatch(rest); rl != nil {
 			ev.Relay = strings.TrimSpace(rl[1])
 		}
@@ -315,11 +336,18 @@ func Parse(r io.Reader, year int) Log {
 		l.Events = append(l.Events, ev)
 	}
 
-	// Backfill message-ids onto events from the queue map.
+	// Backfill message-ids and envelope senders onto events from the queue maps,
+	// so a delivery line that lacked an inline message-id or from= inherits them
+	// from the cleanup/qmgr lines of the same queue-id (WO-42).
 	for i := range l.Events {
 		if l.Events[i].MessageID == "" {
 			if mid, ok := l.queueToMsg[l.Events[i].QueueID]; ok {
 				l.Events[i].MessageID = mid
+			}
+		}
+		if l.Events[i].MailFrom == "" {
+			if fr, ok := l.queueToFrom[l.Events[i].QueueID]; ok {
+				l.Events[i].MailFrom = fr
 			}
 		}
 	}
@@ -373,67 +401,134 @@ func (l Log) EventsForRecipient(addr string, from, until time.Time) []Event {
 	return out
 }
 
+// eventCoversWant reports whether a delivery event's recipient identifies the
+// wanted address, by exact match or by a bare Dovecot mailbox username matching
+// the wanted local-part (mirrors deliver.recipientMatches; maillog cannot import
+// deliver). Both To and OrigTo (the alias bridge) are considered.
+func eventCoversWant(e Event, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	for _, evTo := range []string{e.To, e.OrigTo} {
+		evTo = strings.ToLower(strings.TrimSpace(evTo))
+		if evTo == "" {
+			continue
+		}
+		if evTo == want {
+			return true
+		}
+		if !strings.Contains(evTo, "@") {
+			if i := strings.Index(want, "@"); i > 0 && evTo == want[:i] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // EventsForRecipientSet finds the delivery events of the single logged message
-// whose recipient set covers every address in want, within the window. WO-42:
-// when the forwarded copy's Message-ID does not match the log (Outlook strips it,
-// Exchange rewrites it), the full recipient SET is a strong join key. A logged
-// message is one queue-id; its recipient set is the To/OrigTo values across its
-// events. If exactly one queue-id in the window covers all of want, its events
-// are returned. If zero or MORE THAN ONE cover the set, nil is returned — the
-// match is ambiguous and must not be guessed (mirror, not oracle).
-func (l Log) EventsForRecipientSet(want []string, from, until time.Time) []Event {
+// whose recipient set covers every address in want, within the window and (when
+// known on both sides) sent by wantFrom. WO-42: when the forwarded copy's
+// Message-ID does not match the log (Outlook strips it, Exchange rewrites it), the
+// full recipient SET plus sender is a strong join key that survives both.
+//
+// A logged message is grouped by MESSAGE-ID (backfilled onto every event,
+// including Dovecot local stores which have no queue-id) so mixed remote+local
+// deliveries of one message form one candidate; events with no recoverable
+// message-id fall back to their queue-id as the group key so none are dropped.
+//
+// Sender is part of the uniqueness key: a candidate's MailFrom must equal wantFrom
+// when both are known. If wantFrom is set but a candidate has no known sender, that
+// candidate is rejected (we cannot confirm the sender). If wantFrom is empty, the
+// sender is not constrained. Returns the events of the SINGLE qualifying candidate,
+// or nil when zero or more than one qualify (ambiguous — never guess).
+func (l Log) EventsForRecipientSet(want []string, wantFrom string, from, until time.Time) []Event {
 	if len(want) == 0 {
 		return nil
 	}
-	wantSet := map[string]bool{}
+	var wantList []string
 	for _, w := range want {
 		w = strings.ToLower(strings.TrimSpace(w))
 		if w != "" {
-			wantSet[w] = true
+			wantList = append(wantList, w)
 		}
 	}
-	if len(wantSet) == 0 {
+	if len(wantList) == 0 {
 		return nil
 	}
+	wantFrom = strings.ToLower(strings.TrimSpace(wantFrom))
 
-	// Group in-window events by queue-id; track which wanted addresses each covers.
-	byQueue := map[string][]Event{}
-	covers := map[string]map[string]bool{}
+	// Group in-window delivery events by message-id (queue-id fallback).
+	byMsg := map[string][]Event{}
 	for _, e := range l.Events {
-		if e.QueueID == "" {
-			continue
-		}
 		if !from.IsZero() && !e.Time.IsZero() && e.Time.Before(from) {
 			continue
 		}
 		if !until.IsZero() && !e.Time.IsZero() && e.Time.After(until) {
 			continue
 		}
-		byQueue[e.QueueID] = append(byQueue[e.QueueID], e)
-		for _, cand := range []string{e.To, e.OrigTo} {
-			cand = strings.ToLower(strings.TrimSpace(cand))
-			if wantSet[cand] {
-				if covers[e.QueueID] == nil {
-					covers[e.QueueID] = map[string]bool{}
-				}
-				covers[e.QueueID][cand] = true
-			}
+		key := e.MessageID
+		if key == "" {
+			key = "qid:" + e.QueueID
 		}
+		if key == "qid:" {
+			continue // no msgid and no queue-id: cannot group this event
+		}
+		byMsg[key] = append(byMsg[key], e)
 	}
 
-	// A queue-id qualifies when it covers every wanted address. Require exactly one.
-	var matchQueue string
+	// A candidate qualifies when its events cover every wanted address AND its
+	// sender matches (when constrained). Require exactly one qualifying candidate.
+	var matchKey string
 	matches := 0
-	for qid, c := range covers {
-		if len(c) == len(wantSet) {
+	for key, evs := range byMsg {
+		if !senderMatches(evs, wantFrom) {
+			continue
+		}
+		covered := true
+		for _, w := range wantList {
+			any := false
+			for _, e := range evs {
+				if eventCoversWant(e, w) {
+					any = true
+					break
+				}
+			}
+			if !any {
+				covered = false
+				break
+			}
+		}
+		if covered {
 			matches++
-			matchQueue = qid
+			matchKey = key
 		}
 	}
 	if matches != 1 {
 		return nil
 	}
-	return byQueue[matchQueue]
+	return byMsg[matchKey]
+}
+
+// senderMatches reports whether a candidate message's events are consistent with
+// the wanted sender. WO-42: when wantFrom is set, at least one event must carry a
+// known MailFrom equal to it, and no event may carry a DIFFERENT known MailFrom.
+// A candidate with no known sender at all is rejected when wantFrom is set (we
+// cannot confirm it). When wantFrom is empty, the sender is unconstrained.
+func senderMatches(evs []Event, wantFrom string) bool {
+	if wantFrom == "" {
+		return true
+	}
+	sawMatch := false
+	for _, e := range evs {
+		mf := strings.ToLower(strings.TrimSpace(e.MailFrom))
+		if mf == "" {
+			continue
+		}
+		if mf != wantFrom {
+			return false
+		}
+		sawMatch = true
+	}
+	return sawMatch
 }
 
 func itoa(n int) string {
