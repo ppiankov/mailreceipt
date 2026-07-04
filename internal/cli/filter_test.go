@@ -468,8 +468,11 @@ func TestFilterStrippedMessageIDUniqueWindowMatchResolves(t *testing.T) {
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
 		t.Fatalf("unique window match should resolve to delivered_remote:\n%s", decodedJSON)
 	}
-	if !strings.Contains(decodedJSON, `"match_method": "recipient_window"`) {
-		t.Fatalf("expected recipient_window match method:\n%s", decodedJSON)
+	// WO-42: a unique recipient-set match (recipient_set) or the per-recipient
+	// window (recipient_window) are both valid no-Message-ID resolutions.
+	if !strings.Contains(decodedJSON, `"match_method": "recipient_set"`) &&
+		!strings.Contains(decodedJSON, `"match_method": "recipient_window"`) {
+		t.Fatalf("expected a recipient-based match method:\n%s", decodedJSON)
 	}
 }
 
@@ -590,6 +593,32 @@ func TestFilterQuotedPrintableAngleRecipientIsDelivered(t *testing.T) {
 	}
 	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
 		t.Fatalf("decoded recipient should match the delivery log, got:\n%s", decodedJSON)
+	}
+}
+
+// WO-37: nested QP angle delimiters must decode before raw-token fallback so
+// the delivered recipient, not a literal =3C-prefixed artifact, is correlated.
+func TestFilterNestedQuotedPrintableAngleRecipientIsDelivered(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := sentMailWithHeaders("qp-angle@example.test", "<=3Cjohn@example.test=3E> trailing text",
+		"From: Sender <sender@example.test>")
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, filterQPAngleRecipientLog)
+	decodedJSON := filterDecodedJSON(t, out)
+	if !strings.Contains(decodedJSON, `"recipient": "john@example.test"`) {
+		t.Fatalf("filter JSON missing decoded nested recipient:\n%s", decodedJSON)
+	}
+	if strings.Contains(decodedJSON, `"recipient": "3cjohn@example.test"`) ||
+		strings.Contains(decodedJSON, `"recipient": "=3cjohn@example.test"`) {
+		t.Fatalf("filter must not use raw nested delimiter artifact:\n%s", decodedJSON)
+	}
+	if !strings.Contains(decodedJSON, `"outcome": "delivered_remote"`) {
+		t.Fatalf("decoded nested recipient should match the delivery log, got:\n%s", decodedJSON)
 	}
 }
 
@@ -1129,5 +1158,72 @@ func TestFilterDedupOffByDefaultEmitsEachTime(t *testing.T) {
 	}
 	if out := runFilter(t, "docketing@acme.test", trigger, filterConfig); !strings.Contains(out, "MAIL DELIVERY RECEIPT") {
 		t.Fatalf("without dedup, second invocation must still emit")
+	}
+}
+
+// WO-42: end-to-end — a forwarded message with a non-matching Message-ID resolves
+// its recipient via the recipient-set match through the full filter flow.
+func TestFilterRecipientSetMatchEndToEnd(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: a@clientfirm.test, b@clientfirm.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 19 Jun 2026 15:00:30 +0000\r\n" +
+		"Message-ID: <sentcopy-id@example.test>\r\n" +
+		"\r\nbody\r\n"
+	logBody := `Jun 19 15:00:00 mail01 postfix/qmgr[900]: A1FFFF19: from=<sender@example.test>, size=1, nrcpt=2 (queue active)
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1FFFF19: message-id=<wire-id@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1FFFF19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1FFFF19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 OK b)
+`
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, logBody)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if !strings.Contains(decodedJSON, `"recipient": "`+rcpt+`"`) {
+			t.Fatalf("missing recipient %q:\n%s", rcpt, decodedJSON)
+		}
+	}
+	if !strings.Contains(decodedJSON, `"match_method": "recipient_set"`) {
+		t.Fatalf("expected recipient_set match:\n%s", decodedJSON)
+	}
+}
+
+// WO-42 rev-5: end-to-end — KLMS supplies the message-id's sender + recipient set,
+// delivery lines supply per-recipient outcomes, and a forward with a non-matching
+// Message-ID resolves every recipient via recipient_set through the filter flow.
+func TestFilterKLMSIdentifiedSetEndToEnd(t *testing.T) {
+	cfg := `receipt_filter:
+  domains: [example.test]
+  reply_from: receipt@example.test
+  teams:
+    legal:
+      members: [sender@example.test]
+`
+	sent := "From: Sender <sender@example.test>\r\n" +
+		"To: a@clientfirm.test, b@clientfirm.test\r\n" +
+		"Subject: Filing\r\n" +
+		"Date: Fri, 19 Jun 2026 15:00:30 +0000\r\n" +
+		"Message-ID: <sentcopy@example.test>\r\n" +
+		"\r\nbody\r\n"
+	logBody := `Jun 19 15:00:00 mail01 KLMS: clean: message-id="<wire@example.test>": mail-from="sender@example.test": rcpt-to="a@clientfirm.test","b@clientfirm.test"
+Jun 19 15:00:01 mail01 postfix/cleanup[900]: A1D0DD19: message-id=<wire@example.test>
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1D0DD19: to=<a@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 a)
+Jun 19 15:00:02 mail01 postfix/smtp[901]: A1D0DD19: to=<b@clientfirm.test>, relay=mx.clientfirm.test[203.0.113.9]:25, status=sent (250 b)
+`
+	out := runFilterWithLogAndArgs(t, "sender@example.test", triggerWithAttachment(sent), cfg, logBody)
+	decodedJSON := filterDecodedJSON(t, out)
+	for _, rcpt := range []string{"a@clientfirm.test", "b@clientfirm.test"} {
+		if !strings.Contains(decodedJSON, `"recipient": "`+rcpt+`"`) {
+			t.Fatalf("missing recipient %q:\n%s", rcpt, decodedJSON)
+		}
+	}
+	if !strings.Contains(decodedJSON, `"match_method": "recipient_set"`) {
+		t.Fatalf("expected recipient_set match:\n%s", decodedJSON)
 	}
 }

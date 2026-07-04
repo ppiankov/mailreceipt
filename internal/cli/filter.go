@@ -129,14 +129,15 @@ func filterCmd() *cobra.Command {
 			log := maillog.Parse(bytes.NewReader(logInput.Data), logYear)
 
 			e := forwarded.Email
-			if forwarded.Attached && e.MessageID != "" {
-				// WO-13: an attached .eml with a Message-ID is a precise selector;
-				// require exact Message-ID correlation and never borrow recipient-
-				// window lines. WO-41: Outlook's forward-as-attachment STRIPS the
-				// original Message-ID (keeping only its Date), so an attachment with
-				// no Message-ID has no exact key. In that case keep the Date so the
-				// recipient+date-window fallback can run — it attributes only on a
-				// unique (single queue-id) match, so it still never guesses.
+			if forwarded.Attached && e.MessageID != "" && len(log.EventsForMessageID(e.MessageID)) > 0 {
+				// WO-13: an attached .eml whose Message-ID CORRELATES to a delivery is
+				// a precise selector; require exact Message-ID correlation and never
+				// borrow recipient-window lines. WO-41/WO-42: Outlook strips the
+				// original Message-ID and Exchange rewrites it, so an attachment whose
+				// Message-ID is absent OR present-but-unmatched has no usable exact key.
+				// In that case keep the Date so the recipient-set / window fallback can
+				// run — both attribute only on a unique (sender+set / single-queue-id)
+				// match, so they still never guess.
 				e.Date = time.Time{}
 			}
 			res := deliver.Analyze(e, log)

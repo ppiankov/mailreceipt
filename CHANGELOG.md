@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-04
+
+### Fixed
+- Forwarded messages now correlate by recipient set when the Message-ID does not
+  match the log. Outlook's forward-as-attachment strips the original Message-ID,
+  and Exchange rewrites it between the Sent-folder copy and the transmitted
+  message — so correlating by Message-ID alone reported `not_found` even when the
+  message was delivered. When the Message-ID does not correlate (absent or
+  present-but-unmatched) and a send `Date` is available, delivery is matched by the
+  full recipient set within the date window: candidates are grouped by message-id
+  so a mixed message (some recipients delivered remotely, others stored locally by
+  Dovecot) is one candidate, and the envelope sender must match so a send is never
+  attributed to a different sender's same-recipient-set message. If exactly one
+  logged message covers the set with a matching sender, every recipient resolves
+  from it — including recipients who also received unrelated mail in the window. If
+  zero or more than one match, the result stays `not_found` rather than guess. The
+  sender may match the forwarded `From` or `Sender` (send-on-behalf mail), and a
+  scanner (KLMS) line's `mail-from`/`rcpt-to` can identify the message's sender and
+  recipient set — but per-recipient outcomes always come from real delivery lines,
+  never the scanner line. When the forwarded sender is known and the message has
+  multiple recipients, delivery is attributed only after the sender is confirmed;
+  it never falls back to a sender-blind per-recipient window. The envelope sender is
+  read only from top-level MTA fields, never from a remote server's response text.
+  When a scanner line proves a recipient set that includes a locally-aliased mailbox,
+  a single unmatched recipient is allocated to a single unmatched Dovecot local-store
+  event under a strict one-to-one rule (any ambiguity stays `not_found`).
+- Recipients wrapped in encoded angle delimiters (e.g. `<=3Cname@host=3E>`) now
+  decode correctly instead of being dropped as malformed.
+
 ## [0.6.2] - 2026-07-03
 
 ### Fixed

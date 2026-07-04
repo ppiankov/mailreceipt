@@ -16,6 +16,7 @@
 package deliver
 
 import (
+	"net/mail"
 	"sort"
 	"strings"
 	"time"
@@ -68,9 +69,10 @@ func (o Outcome) IsDelivered() bool {
 type MatchMethod string
 
 const (
-	MatchMessageID MatchMethod = "message_id"
-	MatchRecipient MatchMethod = "recipient_window"
-	MatchNone      MatchMethod = "none"
+	MatchMessageID    MatchMethod = "message_id"
+	MatchRecipient    MatchMethod = "recipient_window"
+	MatchRecipientSet MatchMethod = "recipient_set"
+	MatchNone         MatchMethod = "none"
 )
 
 // RecipientResult is the cited outcome for one recipient.
@@ -163,8 +165,43 @@ func Analyze(e eml.Email, log maillog.Log) Result {
 
 	recipients := e.Recipients()
 	sole := len(recipients) == 1
-	for _, rcpt := range recipients {
-		res.Recipients = append(res.Recipients, analyzeRecipient(e, rcpt, log, sole))
+
+	// WO-42: when the forwarded copy's Message-ID does not correlate (Outlook
+	// strips it, Exchange rewrites it between the Sent copy and the wire), try to
+	// pin the message by its full recipient SET before falling to per-recipient
+	// windows. If the set uniquely identifies one logged message (one queue-id) in
+	// the window, attribute every recipient from that message's events. This is
+	// strictly more precise than per-recipient matching and resolves recipients
+	// who also received unrelated mail in the window. Only engaged when no
+	// recipient correlates by Message-ID, and only on a unique set match.
+	if setEvents := setMatchEvents(e, recipients, log); setEvents != nil {
+		// WO-42: allocate a single KLMS-proved but unmatched local recipient to a
+		// single unmatched Dovecot local-store event (aliased mailbox), under a strict
+		// 1:1 uniqueness rule. Never guesses when more than one of either remains.
+		alloc := allocateAliasedLocal(recipients, setEvents, e, log)
+		for _, rcpt := range recipients {
+			res.Recipients = append(res.Recipients, resultFromEvents(rcpt, setEvents, alloc, MatchRecipientSet, e, log))
+		}
+	} else {
+		// The per-recipient window fallback is safe only in narrow conditions:
+		//   - WO-13/WO-42: a present-but-unmatched Message-ID must NOT use the window
+		//     (a single recipient is too weak a fingerprint and could borrow an
+		//     unrelated same-address delivery); resolve id-only instead.
+		//   - WO-42 safety: when a forwarded SENDER is known and the message has
+		//     MULTIPLE recipients, the window must NOT attribute without confirming
+		//     the sender (the set-match already required sender; the window does not
+		//     have the full-set fingerprint to compensate). Fall to id-only so it
+		//     stays not_found rather than assert delivery without sender confirmation.
+		// The single-recipient no-Message-ID case keeps its WO-41 uniqueness fallback.
+		hasSender := len(forwardedSenders(e)) > 0
+		windowAllowed := e.MessageID == "" && (sole || !hasSender)
+		for _, rcpt := range recipients {
+			if windowAllowed {
+				res.Recipients = append(res.Recipients, analyzeRecipient(e, rcpt, log, sole))
+			} else {
+				res.Recipients = append(res.Recipients, analyzeRecipientIDOnly(e, rcpt, log, sole))
+			}
+		}
 	}
 	// Stable order for deterministic output/tests.
 	sort.Slice(res.Recipients, func(i, j int) bool {
@@ -206,6 +243,35 @@ func eventMatchesRecipient(ev maillog.Event, rcpt string) bool {
 	return recipientMatches(ev.To, rcpt) || recipientMatches(ev.OrigTo, rcpt)
 }
 
+// analyzeRecipientIDOnly correlates a recipient by Message-ID ONLY (no window
+// fallback). WO-13/WO-42: used when the attachment's Message-ID was present but
+// matched no delivery and no unique set match was found — the per-recipient window
+// is unsafe there (it could borrow an unrelated same-address delivery), so this
+// yields the exact-id result or not_found.
+func analyzeRecipientIDOnly(e eml.Email, rcpt string, log maillog.Log, sole bool) RecipientResult {
+	var events []maillog.Event
+	if e.MessageID != "" {
+		for _, ev := range log.EventsForMessageID(e.MessageID) {
+			if eventMatchesRecipient(ev, rcpt) || (sole && ev.Daemon == "dovecot") {
+				events = append(events, ev)
+			}
+		}
+	}
+	if len(events) == 0 {
+		return notFoundResult(rcpt, e.MessageID, log)
+	}
+	chosen := chooseEvent(events)
+	return RecipientResult{
+		Recipient: rcpt,
+		Outcome:   outcomeFor(chosen),
+		Match:     MatchMessageID,
+		Relay:     chosen.Relay,
+		Response:  chosen.Response,
+		Time:      chosen.Time,
+		Citation:  chosen.RawLine,
+	}
+}
+
 func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) RecipientResult {
 	// 1) Strongest link: Message-ID, then filter to this recipient.
 	var events []maillog.Event
@@ -235,6 +301,14 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) Reci
 		from := e.Date.Add(-Window)
 		until := e.Date.Add(Window)
 		events = log.EventsForRecipient(rcpt, from, until)
+		// WO-42: respect the forwarded sender here too, so a window match cannot
+		// attribute a delivery that the set-match already rejected for a sender
+		// mismatch. Drop events whose known MailFrom differs from the forwarded
+		// sender; an event with no known sender is left (consistent with the
+		// set-match rule that only a KNOWN different sender disqualifies).
+		if wantFroms := forwardedSenders(e); len(wantFroms) > 0 {
+			events = filterBySender(events, wantFroms)
+		}
 		// WO-41: the window can catch deliveries of DIFFERENT messages to the same
 		// recipient. Attribute only when the match is unambiguous — every matched
 		// event belongs to a single message (one queue-id). Multiple queue-ids mean
@@ -266,6 +340,181 @@ func analyzeRecipient(e eml.Email, rcpt string, log maillog.Log, sole bool) Reci
 		Time:      chosen.Time,
 		Citation:  chosen.RawLine,
 	}
+}
+
+// setMatchEvents returns the events of the single logged message whose recipient
+// set matches the forwarded message's, or nil. WO-42: it engages only when the
+// Message-ID does not correlate for ANY recipient (absent, or present but
+// matching no log event — Exchange rewrites the id), and a send Date is present
+// to bound the window. A nil result means "no unique set match" and the caller
+// falls back to per-recipient analysis.
+func setMatchEvents(e eml.Email, recipients []string, log maillog.Log) []maillog.Event {
+	if e.Date.IsZero() || len(recipients) == 0 {
+		return nil
+	}
+	// If the Message-ID already correlates to any delivery, the exact-id path is
+	// authoritative; do not override it with a set guess.
+	if e.MessageID != "" && len(log.EventsForMessageID(e.MessageID)) > 0 {
+		return nil
+	}
+	from := e.Date.Add(-Window)
+	until := e.Date.Add(Window)
+	// WO-42: the forwarded message's sender is part of the uniqueness key so a
+	// send is never attributed to a different sender's same-recipient-set message.
+	// Prefer From; fall back to Sender. When neither is known the set match runs
+	// unconstrained by sender (EventsForRecipientSet still requires a unique set).
+	return log.EventsForRecipientSet(recipients, forwardedSenders(e), from, until)
+}
+
+// forwardedSenders returns the bare sender addresses of the forwarded message —
+// both From and Sender, deduped. WO-42: send-on-behalf mail carries From: the
+// represented author and Sender: the actual sender, and the log's envelope sender
+// may match EITHER. Mirrors the filter's ownership model, which accepts either.
+func forwardedSenders(e eml.Email) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, cand := range []string{e.From, e.Sender} {
+		if addr := bareAddress(cand); addr != "" && !seen[addr] {
+			seen[addr] = true
+			out = append(out, addr)
+		}
+	}
+	return out
+}
+
+// filterBySender drops events whose KNOWN envelope sender matches NONE of
+// wantFroms. Events with no recorded sender are kept (unknown, not contradictory).
+// WO-42: wantFroms is the forwarded From/Sender candidate set (delegated mail).
+func filterBySender(events []maillog.Event, wantFroms []string) []maillog.Event {
+	want := map[string]bool{}
+	for _, w := range wantFroms {
+		want[strings.ToLower(strings.TrimSpace(w))] = true
+	}
+	var out []maillog.Event
+	for _, e := range events {
+		mf := strings.ToLower(strings.TrimSpace(e.MailFrom))
+		if mf != "" && !want[mf] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// bareAddress extracts a lowercased addr-spec from a header value that may be a
+// display-name form ("Name" <addr>) or a plain address. Returns "" when empty.
+func bareAddress(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if a, err := mail.ParseAddress(v); err == nil {
+		return strings.ToLower(strings.TrimSpace(a.Address))
+	}
+	return strings.ToLower(v)
+}
+
+// resultFromEvents builds a recipient's result from a pinned set of events (all
+// from one message, WO-42). It selects the events addressed to this recipient and
+// chooses the decisive one; if none in the pinned set match this recipient, it is
+// not found (the set covered the address via a different event form).
+func resultFromEvents(rcpt string, events []maillog.Event, alloc map[string]maillog.Event, method MatchMethod, e eml.Email, log maillog.Log) RecipientResult {
+	var mine []maillog.Event
+	for _, ev := range events {
+		if eventMatchesRecipient(ev, rcpt) {
+			mine = append(mine, ev)
+		}
+	}
+	if len(mine) == 0 {
+		// WO-42: a KLMS-proved local recipient with no direct match may have been
+		// uniquely allocated to an aliased Dovecot local-store event.
+		if ev, ok := alloc[strings.ToLower(strings.TrimSpace(rcpt))]; ok {
+			mine = []maillog.Event{ev}
+		} else {
+			return notFoundResult(rcpt, e.MessageID, log)
+		}
+	}
+	chosen := chooseEvent(mine)
+	return RecipientResult{
+		Recipient: rcpt,
+		Outcome:   outcomeFor(chosen),
+		Match:     method,
+		Relay:     chosen.Relay,
+		Response:  chosen.Response,
+		Time:      chosen.Time,
+		Citation:  chosen.RawLine,
+	}
+}
+
+// allocateAliasedLocal maps a single KLMS-proved but otherwise-unmatched local
+// recipient to a single unmatched Dovecot local-store event, under a strict 1:1
+// uniqueness rule (WO-42). It returns rcpt -> event only when EXACTLY ONE wanted
+// recipient is unmatched by the candidate's delivery events AND EXACTLY ONE Dovecot
+// local-store event in the candidate is unmatched, AND that recipient is in the
+// candidate message's KLMS-recorded recipient set. Any ambiguity (more than one of
+// either) yields no allocation — the unmatched recipients stay not_found rather
+// than guess which mailbox is which.
+func allocateAliasedLocal(recipients []string, setEvents []maillog.Event, e eml.Email, log maillog.Log) map[string]maillog.Event {
+	// Unmatched wanted recipients (no covering delivery event).
+	var unmatchedRcpt []string
+	for _, rcpt := range recipients {
+		covered := false
+		for _, ev := range setEvents {
+			if eventMatchesRecipient(ev, rcpt) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			unmatchedRcpt = append(unmatchedRcpt, rcpt)
+		}
+	}
+	if len(unmatchedRcpt) != 1 {
+		return nil
+	}
+
+	// Unmatched Dovecot local-store events (delivered_local, matching no wanted rcpt).
+	var unmatchedDovecot []maillog.Event
+	for _, ev := range setEvents {
+		if ev.Daemon != "dovecot" {
+			continue
+		}
+		matchesAny := false
+		for _, rcpt := range recipients {
+			if eventMatchesRecipient(ev, rcpt) {
+				matchesAny = true
+				break
+			}
+		}
+		if !matchesAny {
+			unmatchedDovecot = append(unmatchedDovecot, ev)
+		}
+	}
+	if len(unmatchedDovecot) != 1 {
+		return nil
+	}
+
+	// The lone unmatched recipient must be KLMS-proved for the candidate message.
+	rcpt := strings.ToLower(strings.TrimSpace(unmatchedRcpt[0]))
+	proved := false
+	for _, ev := range setEvents {
+		if ev.MessageID == "" {
+			continue
+		}
+		for _, r := range log.ScannerRecipients(ev.MessageID) {
+			if strings.ToLower(strings.TrimSpace(r)) == rcpt {
+				proved = true
+				break
+			}
+		}
+		if proved {
+			break
+		}
+	}
+	if !proved {
+		return nil
+	}
+	return map[string]maillog.Event{rcpt: unmatchedDovecot[0]}
 }
 
 // notFoundResult builds a NotFound for a recipient. WO-33: if the message-id was
