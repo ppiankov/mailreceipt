@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-04
+
 ### Fixed
 - Forwarded messages now correlate by recipient set when the Message-ID does not
   match the log. Outlook's forward-as-attachment strips the original Message-ID,
