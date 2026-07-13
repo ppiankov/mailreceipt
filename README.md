@@ -119,8 +119,10 @@ mailreceipt verify DEMO-1.receipt.json --log testdata/mail.log
 
 The email may be a file argument or piped on stdin. It accepts a real RFC822
 message or a pasted top-of-thread block (the messy `From:/Sent:/To:` forwarded
-format). When there is no `Message-ID`, it falls back to recipient + time-window
-matching.
+format). When the `Message-ID` does not correlate — absent, or present but
+matching no log line (some clients strip or rewrite it on forward) — it falls back
+to matching by the full recipient set and sender within the send-time window, and
+attributes only on a unique match.
 
 ## Receipt-by-email filter
 
@@ -161,12 +163,16 @@ mailreceipt filter --envelope-from "$SENDER" --from receipt@example.com --log /v
 ```
 
 Forward the original sent message as an `.eml` / `message/rfc822` attachment.
-Inline forwards are tolerated for pasted-header workflows, but attachments
-preserve the Message-ID and keep correlation exact. Base64 or quoted-printable
-encoded `.eml` attachments are supported when the attachment is explicitly a
-sent message (`message/rfc822` or a `.eml` filename). Unauthorized senders, team
-mismatches, loops (`Auto-Submitted` or `Precedence: bulk`), malformed requests,
-and unreadable forwarded attachments produce no reply.
+Inline forwards are tolerated for pasted-header workflows. When the attachment's
+`Message-ID` matches the log, correlation is exact. Some clients do not preserve it
+— Outlook's forward-as-attachment strips the original `Message-ID`, and Exchange
+rewrites it between the Sent copy and the wire — so mailreceipt also correlates by
+the full recipient set and sender within the send-time window, attributing only on
+a unique match (and staying `not_found` when the match is ambiguous). Base64 or
+quoted-printable encoded `.eml` attachments are supported when the attachment is
+explicitly a sent message (`message/rfc822` or a `.eml` filename). Unauthorized
+senders, team mismatches, loops (`Auto-Submitted` or `Precedence: bulk`), malformed
+requests, and unreadable forwarded attachments produce no reply.
 
 ## Failure modes
 
@@ -203,7 +209,7 @@ evidence that the artifact has not been altered since it was created.
 email.eml ──► extract Message-ID + recipients        [internal/eml]
 mail.log  ──► parse to per-recipient delivery events  [internal/maillog]
               │
-              ├─ correlate: message-id match, else recipient+window  [internal/deliver]
+              ├─ correlate: message-id, else recipient-set+sender, else window  [internal/deliver]
               ├─ pick authoritative event (latest; terminal > deferred)
               └─ outcome per recipient, each citing its raw log line
                      │
