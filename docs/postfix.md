@@ -192,11 +192,17 @@ sudo -u mailreceipt sh -c '
   cd /etc/mailreceipt &&
   /usr/local/bin/mailreceipt filter \
     --envelope-from sender@example.com \
-    --log /var/log/mail.log \
+    --log "/var/log/mail.log*" \
     < /path/to/trigger.eml \
     > /tmp/mailreceipt-reply.eml
 '
 ```
+
+Quote the `--log` glob so `mailreceipt` (not the shell) expands it: it reads every
+`/var/log/mail.log*` file and decompresses `.gz` rotated logs internally. A single
+`--log /var/log/mail.log` only searches the current file, so a receipt for a message
+older than the current log will miss the delivery in a rotated file. Use the same
+quoted glob in the Postfix pipe wrapper.
 
 If `/tmp/mailreceipt-reply.eml` is non-empty, send it through Postfix:
 
